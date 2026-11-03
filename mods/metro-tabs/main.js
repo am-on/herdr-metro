@@ -41,8 +41,11 @@ const mark = (t, s) => s === "working" ? breathing(t.ansi2)
   : s === "blocked" ? blockedMark(t)
   : div().size(7).flex_none().rounded_full().bg(t.done);
 
-// The work area is a stack in the layout: the active tab ("main"), or one agent full size ("agent").
+// The work area is a stack in the layout: the active tab ("main"), one agent full size ("agent"), or the pull
+// requests ("prs", metro-prs).
 const agentView = () => find(layout(), "view")?.active === "agent";
+const prsView = () => find(layout(), "view")?.active === "prs";
+const showTabs = () => run("layout.select", { stack: "view", child: "main" });
 const switchView = () => run("layout.select", { stack: "view", child: agentView() ? "main" : "agent" });
 
 function find(node, id) {
@@ -174,6 +177,13 @@ export default class Tabs extends View {
       .when(["working", "blocked", "done"].includes(a.status) && news, el => el.child(mark(t, a.status)));
   }
 
+  // In the pull requests view the bar names it; the brand bar's button and the one here lead back.
+  prsBar(t) {
+    return h_flex().id("prs-bar").flex_1().min_w(0).h(28).px(8).gap(8).items_center().text_size(13).text_color(t.foreground)
+      .child(svg("mods/metro-chrome/icons/git-pull-request.svg").size(14).flex_none().text_color(t.muted))
+      .child(div().truncate().child("Pull requests"));
+  }
+
   render(cx) {
     const t = theme();
     const space = spaces().find(p => p.active);
@@ -197,6 +207,8 @@ export default class Tabs extends View {
         run("pane.focus", { pane: plain.pane });
       } else if (moved && f.agent !== moved.terminal) run("agent.focus", { terminal: moved.terminal });
     }
+    // The pull requests view gives way to the tabs as soon as a pane is focused or opened in this space.
+    if (prsView() && (moved || fresh.some(p => here.has(p.tab)))) showTabs();
     const stop = (_e, cx) => cx.stop_propagation();
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
@@ -266,15 +278,15 @@ export default class Tabs extends View {
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? (agentView() ? "agent.prev" : "tab.prev") : (agentView() ? "agent.next" : "tab.next")); })
       .when(Boolean(sidebar?.hidden), el => el.child(this.sidebarToggle(t, stop)))
-      .child(agentView() ? this.agentBar(t, title, live)
+      .child(agentView() ? this.agentBar(t, title, live) : prsView() ? this.prsBar(t)
         // The + follows the last tab; the tabs scroll and it stays in view.
         : h_flex().flex_1().min_w(0).h_full().items_center()
           .child(h_flex().id("tab-scroll").min_w(0).h_full().border_l(1).border_color(t.border).overflow_x_scroll().children(shown.map(item)))
           .child(button("tab-add", svg("mods/metro-chrome/icons/plus.svg").size(14), () => openOverlay({ mod: "metro-new-tab", kind: "popup", width: 220, height: 160, props: { space: space?.id } }))
             .ml(6).role("button").accessibility_label("New tab")))
-      .children(this.githubLinks(t, stop, cx))
+      .children(prsView() ? [] : this.githubLinks(t, stop, cx))
       // The agent view is reached only by its key; while it shows, a button leads back to the tabs.
-      .when(Boolean(find(root, "view")) && agentView(), el => el.child(button("view-toggle", svg("mods/metro-chrome/icons/layers.svg").size(14), switchView)
+      .when(agentView() || prsView(), el => el.child(button("view-toggle", svg("mods/metro-chrome/icons/layers.svg").size(14), prsView() ? showTabs : switchView)
         .role("button").accessibility_label("Show tabs")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/metro-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/metro-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))

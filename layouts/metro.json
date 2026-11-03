@@ -145,6 +145,15 @@
                   "background": "background",
                   "radius": 0,
                   "children": []
+                },
+                {
+                  "id": "prs",
+                  "type": "block",
+                  "content": {
+                    "mod": "metro-prs"
+                  },
+                  "background": "background",
+                  "children": []
                 }
               ]
             }

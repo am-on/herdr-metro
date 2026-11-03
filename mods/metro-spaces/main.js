@@ -26,8 +26,10 @@ function find(node, id) {
   return null;
 }
 // The agent view keeps the space of the agent it shows, so space.select alone changes nothing there:
-// show this space's agent (its active tab's first), or the tabs when it has none.
+// show this space's agent (its active tab's first), or the tabs when it has none. The pull requests view gives way
+// to the tabs.
 function select(s) {
+  if (find(layout(), "view")?.active === "prs") run("layout.select", { stack: "view", child: "main" });
   if (find(layout(), "view")?.active === "agent") {
     const tab = s.tabs.find((c) => c.active)?.id, mine = agents().filter((a) => a.space === s.id);
     const a = mine.find((a) => a.tab === tab) ?? mine[0];
@@ -596,7 +598,7 @@ export default class Spaces extends View {
     }), id, t).role("button").accessibility_label(`Open ${base(c.path)}`)
       .on_click(() => run("space.new", { folder: c.path, ...(on ? { machine: on } : {}) }))
       .when(this.hovered === id && !c.main, el => el.child(this.cornerClose(`${id}-remove`, "Remove worktree (asks first)", t,
-        () => openOverlay({ mod: "metro-worktree", kind: "dialog", width: 440, height: 220, props: { folder: c.path, machine: on, action: "remove" } }))));
+        () => openOverlay({ mod: "metro-worktree", kind: "dialog", width: 480, height: 300, props: { folder: c.path, machine: on, action: "remove" } }))));
   }
 
   // The × in a hovered card's top-right corner; pressing it never starts a drag or selects the card.

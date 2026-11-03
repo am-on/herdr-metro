@@ -104,7 +104,7 @@ export default class Review extends View {
     this.drag = null; // { x, width } while the file list's edge is dragged
     this.files = []; this.rows = []; this.open = null;
     this.editing = null; // { id?, path, from, to, lines, quote } while a comment is written or edited
-    this.input = InputState.new({ placeholder: "Leave a comment, Enter to add, Esc to cancel" });
+    this.input = InputState.new({ placeholder: "Leave a comment" });
     this.input.on("submit", (_e, cx) => this.addComment(cx));
     this.handle = cx.focus_handle();
     this.known = {};
@@ -354,7 +354,7 @@ export default class Review extends View {
     cx.notify();
   }
 
-  // Enter adds the comment, or saves the edited one; an edit left empty keeps what it said.
+  // Enter or Comment adds the comment, or saves the edited one; an edit left empty keeps what it said.
   addComment(cx) {
     const body = this.input.value().trim(), e = this.editing;
     if (!e) return;
@@ -513,7 +513,7 @@ export default class Review extends View {
           .child(svg("mods/metro-chrome/icons/close.svg").size(10))));
   }
 
-  // The comment being written: the lines it covers, then the input.
+  // The comment being written: the lines it covers, the input, then Cancel (Esc) and Comment or Save (Enter).
   editorRow(t, lost) {
     const e = this.editing, at = this.span(e), label = at ? linesLabel(this.rows.slice(at.from, at.to + 1)) : e.lines;
     const lines = `${label[0].toUpperCase()}${label.slice(1)}`;
@@ -524,7 +524,24 @@ export default class Review extends View {
       .child(div().w(560).h(32).px(10).flex().items_center().rounded(8).bg(t.background).border(1).border_color(t.accent)
         .text_size(12)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .child(Input.new(this.input).w_full().h_full()));
+        .child(Input.new(this.input).w_full().h_full()))
+      .child(h_flex().w(560).pt(2).gap(8).justify_end()
+        .child(this.editorButton(t, "comment-cancel", "Cancel", "esc", false, (cx) => this.closeEditor(cx)))
+        .child(this.editorButton(t, "comment-add", e.id ? "Save" : "Comment", "↵", true, (cx) => this.addComment(cx))));
+  }
+
+  // Each button names its key in a small label after its words.
+  editorButton(t, id, label, key, primary, action) {
+    return h_flex().id(id).h(28).pl(12).pr(6).gap(8).flex_none().items_center().rounded(6).border(1).text_size(12)
+      .border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.background).text_color(primary ? t.solid_foreground : t.foreground)
+      .hover((s) => (primary ? s.opacity(0.85) : s.bg(t.hover)))
+      .role("button").accessibility_label(`${label} (${key === "↵" ? "Enter" : "Esc"})`)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); action(cx); })
+      .child(label)
+      .child(div().h(18).px(5).flex().items_center().rounded(4).text_size(11)
+        .bg(primary ? "#ffffff2e" : t.surface).border(1).border_color(primary ? "#ffffff40" : t.border)
+        .text_color(primary ? t.solid_foreground : t.muted).child(key));
   }
 
   render(cx) {

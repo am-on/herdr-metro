@@ -1,7 +1,7 @@
 // Worktree dialog: { space, action: "new" | "open" | "remove" } or
 // { folder, machine } for a repo without a space; optional { branch, tab, argv }.
 
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { run, props, closeOverlay, theme, spaces, panes, exec, home, settings } from "herdr";
 
@@ -227,18 +227,35 @@ export default class Worktree extends View {
   // The pull requests and origin's branches as they are now, read while the local list already shows.
   loadRemote(repo, cx) {
     cx.spawn(async (cx) => {
-      try { this.prs = await pulls(repo, this.on); }
-      catch { this.prs = []; this.prError = "couldn't load them. Is gh installed and signed in (gh auth status)?"; }
+      let prs = [];
+      try { prs = await pulls(repo, this.on); }
+      catch { this.prError = "couldn't load them. Is gh installed and signed in (gh auth status)?"; }
+      this.keep(() => { this.prs = prs; });
       cx.notify();
     });
     cx.spawn(async (cx) => {
       this.fetching = true;
       cx.notify();
-      try { await fetchOrigin(repo, this.on); this.branches = await branches(repo, this.on); }
+      try { await fetchOrigin(repo, this.on); const fresh = await branches(repo, this.on); this.keep(() => { this.branches = fresh; }); }
       catch (error) { this.fetchError = String(error.message ?? error); }
       this.fetching = false;
       cx.notify();
     });
+  }
+
+  // Changes what the picker lists without moving what's highlighted: once the person has moved through the list, the
+  // highlight stays on the same pull request or branch, at the same place on screen, as rows arrive above it.
+  keep(update) {
+    const id = (i) => i && `${i.kind}\u0000${i.branch}`;
+    const topOf = (items, item) => { const l = this.laid(items); return l.tops[l.rows.findIndex((r) => r.item && id(r.item) === id(item))] ?? 0; };
+    const before = this.items(), was = before[this.at];
+    if (!was || (this.at === 0 && this.scroll === 0)) return update();
+    const at = topOf(before, was);
+    update();
+    const after = this.items(), i = after.findIndex((x) => id(x) === id(was));
+    if (i < 0) { this.at = Math.min(this.at, Math.max(0, after.length - 1)); return; }
+    this.at = i;
+    this.scroll = Math.max(0, this.scroll + topOf(after, after[i]) - at);
   }
 
   // What the picker lists for the typed text: pull requests, then branches without one, then a new branch.
@@ -317,7 +334,7 @@ export default class Worktree extends View {
     const changed = (status.out && !this.dirty) || unpushed.some((name) => !this.unpushed.includes(name));
     this.dirty ||= status.out !== "";
     this.unpushed = [...new Set([...this.unpushed, ...unpushed])];
-    if (changed) return "It changed since this opened. Enter again removes it anyway.";
+    if (changed) return "It changed since this opened. Remove worktree again removes it anyway.";
     // Terminals first: a shell sitting in the folder keeps it busy on Windows.
     // Only spaces inside the checkout close, each by id: an id-less close closes the focused space.
     const inside = (p, dir) => p === dir || p.startsWith(dir + "/");
@@ -525,21 +542,17 @@ export default class Worktree extends View {
     const t = theme();
     if (this.opening) return this.renderOpen(t);
     if (this.picking) return this.renderPick(t);
-    const remove = props()?.action === "remove";
+    if (props()?.action === "remove") return this.renderRemove(t);
     const s = this.space();
     const r = this.repo;
-    const title = remove ? `Remove worktree ${s?.name ?? ""}?` : `New worktree${r ? ` of ${r.name}` : ""}`;
+    const title = `New worktree${r ? ` of ${r.name}` : ""}`;
     const detail =
       r === undefined
         ? "…"
         : r === null
           ? `${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is not in a git repository.`
-          : remove
-            ? !r.linked
-              ? "This is the repository's main checkout, not a worktree."
-              : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`
-            : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists here or on origin is checked out; a new one starts from here.`;
-    const blocked = !r || (remove && !r.linked);
+          : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists here or on origin is checked out; a new one starts from here.`;
+    const blocked = !r;
     return v_flex()
       .id("worktree")
       .track_focus(this.handle)
@@ -551,9 +564,7 @@ export default class Worktree extends View {
       .text_size(13)
       .child(div().font_semibold().text_color(t.foreground).child(title))
       .child(div().text_color(t.muted).child(detail))
-      .when(remove && this.dirty, (el) => el.child(div().text_color(t.blocked).child("It has uncommitted changes: they will be lost.")))
-      .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
-      .when(!remove && !blocked, (el) =>
+      .when(!blocked, (el) =>
         el.child(
           Input.new(this.input)
             .h(32)
@@ -573,7 +584,66 @@ export default class Worktree extends View {
           .justify_end()
           .text_size(11)
           .text_color(t.dim)
-          .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : "↵ create · esc cancel"),
+          .child(this.busy ? "working…" : blocked ? "esc close" : "↵ create · esc cancel"),
       );
+  }
+
+  // Removing a worktree: a trash icon on red and "Remove <name>?" as the heading, what goes and what stays, each risk
+  // in a red box, then Cancel and a red Remove worktree at the bottom right.
+  renderRemove(t) {
+    const r = this.repo;
+    const name = this.space()?.name || (r?.top ?? props()?.folder ?? "").split("/").filter(Boolean).pop() || "this worktree";
+    const mono = settings().font ?? "JetBrains Mono";
+    // Only a folder outside git or the main checkout can't be removed; while it checks, Remove shows, dimmed.
+    const blocked = r === null || (r !== undefined && !r.linked);
+    const risk = (id, text) => h_flex().id(id).w_full().px(12).py(9).gap(10).items_start().rounded(8)
+      .bg(t.blocked + "14").border(1).border_color(t.blocked + "40").text_color(t.blocked)
+      .child(svg("mods/metro-chrome/icons/triangle-alert.svg").size(15).flex_none().mt(1))
+      .child(div().flex_1().min_w(0).child(text));
+    // What it checks shows from the start in a box the size of the warning it may become, so nothing moves when it's done.
+    const quiet = (id, icon, color, text, spin = false) => h_flex().id(id).w_full().px(12).py(9).gap(10).items_start().rounded(8)
+      .bg(t.surface).border(1).border_color(t.border).text_color(t.muted)
+      .child(svg(`mods/metro-chrome/icons/${icon}.svg`).size(15).flex_none().mt(1).text_color(color).when(spin, (el) => el.spin(900)))
+      .child(div().flex_1().min_w(0).child(text));
+    const folder = r?.top ?? props()?.folder ?? this.folder ?? "";
+    const body = r === null ? [div().text_color(t.muted).child(`${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is not in a git repository.`)]
+      : r && !r.linked ? [div().text_color(t.muted).child("This is the repository's main checkout, not a worktree, so it can't be removed.")]
+      : [
+        div().text_color(t.muted).child("Its space closes and this folder is deleted. The branch stays."),
+        div().w_full().px(10).py(7).rounded(6).bg(t.surface).border(1).border_color(t.border).text_size(13).text_color(t.foreground)
+          .font_family(mono).truncate().child(this.userHome ? tilde(folder, this.userHome) : folder),
+        r === undefined ? quiet("checking", "spinner", t.dim, "Checking for uncommitted changes…", true)
+          : this.dirty ? risk("risk-dirty", "It has uncommitted changes: they will be lost.")
+          : quiet("clean", "check", t.ansi2, "No uncommitted changes."),
+        ...(this.unpushed.length ? [risk("risk-submodules", `Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)] : []),
+      ];
+    return v_flex().id("worktree").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+      .size_full().px(24).pt(22).pb(20).gap(14).bg(t.popover).text_size(14)
+      .child(h_flex().gap(12).items_center()
+        .child(div().size(34).flex_none().rounded_full().bg(t.blocked + "1f").flex().items_center().justify_center()
+          .child(svg("mods/metro-chrome/icons/trash.svg").size(17).text_color(t.blocked)))
+        .child(div().flex_1().min_w(0).truncate().text_size(17).text_color(t.foreground).child(`Remove ${name}?`)))
+      .children(body)
+      .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
+      .child(div().flex_1())
+      .child(this.removeButtons(t, blocked));
+  }
+
+  // Removing asks with buttons as well as keys: Cancel (Esc), and a red Remove worktree (Enter) once it can be removed.
+  removeButtons(t, blocked) {
+    // Each button names its key in a small label after its words.
+    const button = (id, label, key, danger, action) => h_flex().id(id).h(34).pl(16).pr(8).gap(10).flex_none().items_center().rounded(7).border(1).text_size(14)
+      .border_color(danger ? t.blocked : t.input).bg(danger ? t.blocked : t.background).text_color(danger ? "#ffffff" : t.foreground)
+      .hover((st) => (danger ? st.opacity(0.85) : st.bg(t.hover)))
+      .role("button").accessibility_label(`${label} (${key === "↵" ? "Enter" : "Esc"})`)
+      .on_click((_e, cx) => action(cx))
+      .child(label)
+      .child(div().h(20).px(6).flex().items_center().rounded(4).text_size(11.5)
+        .bg(danger ? "#ffffff2e" : t.surface).border(1).border_color(danger ? "#ffffff40" : t.border).text_color(danger ? "#ffffff" : t.muted).child(key));
+    const ready = !blocked && this.repo && !this.busy;
+    return h_flex().gap(8).items_center().justify_end()
+      .child(button("cancel", blocked ? "Close" : "Cancel", "esc", false, () => this.close()))
+      .when(!blocked, (el) => el.child(button("remove", this.busy ? "Removing…" : "Remove worktree", "↵", true, (cx) => this.go(cx))
+        .when(!ready, (b) => b.opacity(0.6))));
   }
 }

@@ -3,8 +3,17 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Button, Scrollbar } from "gpui-base";
-import { agents, terminals, panes, focused, run, hc, theme, shared, setShared, setAgentOrder } from "herdr";
+import { agents, terminals, panes, focused, run, hc, theme, shared, setShared, setAgentOrder, layout } from "herdr";
 import { namer } from "./name.js";
+
+function find(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = find(child, id);
+    if (found) return found;
+  }
+  return null;
+}
 const RANK = { blocked: 4, done: 3, check: 2.5, working: 2, idle: 1 };
 // "Check again": an agent the person marked to come back to, a label on its terminal until the agent works again (metro-tabs clears it).
 const CHECK = "metro.check";
@@ -348,7 +357,11 @@ export default class Agents extends View {
           cx.notify();
         })
         // agent.focus, not pane.focus: in tabs it focuses the pane, and it picks what the agent view shows.
-        .on_click(() => run("agent.focus", { terminal: a.address }))
+        // The pull requests view gives way to the tabs.
+        .on_click(() => {
+          if (find(layout(), "view")?.active === "prs") run("layout.select", { stack: "view", child: "main" });
+          run("agent.focus", { terminal: a.address });
+        })
         .child(h_flex().w_full().min_w(0).gap(10).items_center()
         // The logo carries the state as a badge. An agent at rest's badge is a toggle: keep it as Check again, or clear that.
         .child(h_flex().id(`agent-fold-${a.address}`).relative().size(18).flex_none().items_center().justify_center()
