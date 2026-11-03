@@ -58,7 +58,7 @@ const ink = (hex) => {
 
 export default class Spaces extends View {
   init(_props, cx) {
-    this.git = {}; // where() -> { name, branch, ahead, behind, repo, top, linked }, null: not a repo
+    this.git = {}; // where() -> { name, branch, ahead, behind, rewritten, add, del, repo, top, linked }, null: not a repo
     this.trees = {}; // repo -> its checkouts: { path, branch, main }
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
@@ -183,7 +183,7 @@ export default class Spaces extends View {
       const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on });
       const repo = common.stdout.trim();
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
-      const info = { name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), top: top.stdout.trim(), linked: repo !== `${top.stdout.trim()}/.git` };
+      const info = { name, branch: null, ahead: 0, behind: 0, add: 0, del: 0, repo: JSON.stringify([on, repo]), top: top.stdout.trim(), linked: repo !== `${top.stdout.trim()}/.git` };
       // Every checkout of the repo, so the ones no space shows are listed under it too.
       const list = await exec("git", ["worktree", "list", "--porcelain"], { cwd, on });
       if (list.code === 0) this.trees[info.repo] = list.stdout.trim().split(/\n\n+/).map((block) => block.split("\n"))
@@ -197,6 +197,9 @@ export default class Spaces extends View {
           info.behind = Math.abs(parseInt(b, 10)) || 0;
         }
       }
+      Object.assign(info, await this.changes(r.stdout, cwd, on));
+      info.ahead = await this.unpushed(r.stdout, info, cwd, on);
+      info.rewritten = await this.rewritten(info, cwd, on);
       this.git[key] = info;
       if (!on) this.watch(repo, cx);
     } catch {
@@ -204,6 +207,52 @@ export default class Spaces extends View {
       this.git[key] ??= null;
       this.unsure.add(key);
     }
+  }
+
+  // Uncommitted lines, as a review of Uncommitted counts them: tracked files against HEAD, every line of an untracked one.
+  async changes(status, cwd, on) {
+    const lines = status.split("\n");
+    let add = 0, del = 0;
+    const sum = (out) => {
+      for (const l of out.split("\n")) {
+        const [a, d] = l.split("\t");
+        add += parseInt(a, 10) || 0;
+        del += parseInt(d, 10) || 0;
+      }
+    };
+    if (lines.some((l) => /^[12u] /.test(l))) {
+      const git = (args) => exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "diff", "--numstat", "--no-renames", ...args], { cwd, on });
+      // Before the first commit there's no HEAD: the staged files, then the work tree's changes to them.
+      if (lines.includes("# branch.oid (initial)")) for (const args of [["--cached"], []]) sum((await git(args)).stdout);
+      else sum((await git(["HEAD"])).stdout);
+    }
+    if (lines.some((l) => l.startsWith("? "))) {
+      // grep -I counts a binary file as no lines.
+      const r = await exec("sh", ["-c", "git ls-files -z -o --exclude-standard | xargs -0 grep -cHI ''"], { cwd, on });
+      for (const l of r.stdout.split("\n")) add += parseInt(l.slice(l.lastIndexOf(":") + 1), 10) || 0;
+    }
+    return { add, del };
+  }
+
+  // Commits on no remote, so a branch never pushed counts too. Nothing when its upstream is gone (pushed, then deleted
+  // after merging) or for a fork's PR (`pr/<n>`, on GitHub's pull refs only); without remotes, ahead of its upstream.
+  async unpushed(status, info, cwd, on) {
+    const lines = status.split("\n");
+    if (lines.includes("# branch.oid (initial)") || /^pr\/\d+$/.test(info.branch ?? "")) return info.ahead;
+    if (lines.some((l) => l.startsWith("# branch.upstream ")) && !lines.some((l) => l.startsWith("# branch.ab "))) return 0;
+    const remotes = await exec("git", ["remote"], { cwd, on });
+    if (remotes.code !== 0 || !remotes.stdout.trim()) return info.ahead;
+    const r = await exec("git", ["rev-list", "--count", "HEAD", "--not", "--remotes"], { cwd, on });
+    return r.code === 0 ? parseInt(r.stdout, 10) || 0 : info.ahead;
+  }
+
+  // Ahead and behind because the branch was amended or rebased since its push: its upstream's tip was once its own.
+  async rewritten(info, cwd, on) {
+    if (!(info.ahead > 0 && info.behind > 0) || !info.branch) return false;
+    const up = await exec("git", ["rev-parse", "@{upstream}"], { cwd, on });
+    if (up.code !== 0) return false;
+    const log = await exec("git", ["reflog", "show", "--format=%H", `refs/heads/${info.branch}`], { cwd, on });
+    return log.code === 0 && log.stdout.split("\n").includes(up.stdout.trim());
   }
 
   watch(repo, cx) {
@@ -225,7 +274,7 @@ export default class Spaces extends View {
     openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
   }
 
-  // A header per project, then its checkouts (the main one first, marked primary), the ones
+  // A header per project, then its checkouts (the main one first, as Main), the ones
   // no space shows last. Spaces outside a repo stand alone.
   ordered() {
     const sp = spaces(), ps = panes();
@@ -494,16 +543,14 @@ export default class Spaces extends View {
       .when(this.hovered === id, (el) => el.bg(t.background).border_color(t.dim).text_color(t.foreground));
   }
 
-  // A worktree in two lines: a dot and the name (primary on the main checkout), then the branch.
-  card(id, t, { dot, name, branch, primary, dim, nested }) {
+  // A worktree in two lines: a dot and the name, then the branch.
+  card(id, t, { dot, name, branch, dim, nested }) {
     // Every card keeps a 1px border, clear until hovered or shown, so none moves.
     return v_flex().relative().id(id).px(10).py(6).flex_none().justify_center().rounded(10).gap(2).border(1).border_color("#00000000")
       // The mark sits close to the name it belongs to: 6px between them.
       .child(h_flex().w_full().min_w(0).gap(6).items_center()
         .child(h_flex().size(14).flex_none().items_center().justify_center().when(Boolean(dot), el => el.child(dot)))
-        .child(div().min_w(0).truncate().text_size(12.5).text_color(dim ? t.muted : t.foreground).child(name))
-        .when(Boolean(primary), el => el.child(div().flex_none().px(6).h(20).flex().items_center().rounded(5).border(1).border_color(t.border)
-          .text_size(11).text_color(t.muted).child("primary"))))
+        .child(div().min_w(0).truncate().text_size(12.5).text_color(dim ? t.muted : t.foreground).child(name)))
       .when(Boolean(branch), el => el.child(h_flex().w_full().min_w(0).pl(20).gap(6).items_center().text_size(12).text_color(t.dim).child(branch)));
   }
 
@@ -513,7 +560,7 @@ export default class Spaces extends View {
     const branch = c.branch ?? "detached";
     const id = `checkout-${c.path}`;
     return this.lift(this.card(id, t, {
-      dot: null, name: base(c.path), branch, primary, dim: true, nested: true,
+      dot: null, name: primary ? "Main" : base(c.path), branch, dim: true, nested: true,
     }), id, t).role("button").accessibility_label(`Open ${base(c.path)}`)
       .on_click(() => run("space.new", { folder: c.path, ...(on ? { machine: on } : {}) }))
       .when(this.hovered === id && !c.main, el => el.child(this.cornerClose(`${id}-remove`, "Remove worktree (asks first)", t,
@@ -543,12 +590,22 @@ export default class Spaces extends View {
       : w.status === "done" ? div().size(7).rounded_full().bg(t.done)
       : w.status ? div().size(7).rounded_full().border(1.5).border_color(t.dim)
       : null;
-    const branch = g ? h_flex().min_w(0).gap(6).items_center()
-      .child(div().min_w(0).truncate().child(g.branch ?? "detached"))
-      .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`↑${g.ahead}`)))
-      .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`↓${g.behind}`))) : null;
+    // The branch, then at the right what isn't on origin: commits pushed or pulled in the text's grey, the
+    // uncommitted lines in green and red, as metro-review counts them.
+    const branch = g ? h_flex().flex_1().min_w(0).gap(8).items_center()
+      .child(div().flex_1().min_w(0).truncate().child(g.branch ?? "detached"))
+      .when(Boolean(g.rewritten), (el) => el.child(div().id(`amended-${w.id}`).flex_none().text_color(t.muted)
+        .tooltip("Amended or rebased since the last push: force-push to update origin").child("amended")))
+      .when(!g.rewritten && (g.ahead > 0 || g.behind > 0), (el) => el.child(h_flex().flex_none().gap(4).text_color(t.muted)
+        .when(g.ahead > 0, (el) => el.child(div().id(`ahead-${w.id}`)
+          .tooltip(`${g.ahead} ${g.ahead === 1 ? "commit" : "commits"} not pushed`).child(`↑${g.ahead}`)))
+        .when(g.behind > 0, (el) => el.child(div().id(`behind-${w.id}`)
+          .tooltip(`${g.behind} ${g.behind === 1 ? "commit" : "commits"} to pull`).child(`↓${g.behind}`)))))
+      .when(g.add > 0 || g.del > 0, (el) => el.child(h_flex().flex_none().gap(4)
+        .when(g.add > 0, (el) => el.child(div().text_color(t.ansi2).child(`+${g.add}`)))
+        .when(g.del > 0, (el) => el.child(div().text_color(t.ansi1).child(`−${g.del}`))))) : null;
     // Under its folder's or repo's title, a space is its name.
-    return this.lift(this.card(`space-${w.id}`, t, { dot, name: primary ? "Main" : w.name, branch, primary, nested }), `space-${w.id}`, t)
+    return this.lift(this.card(`space-${w.id}`, t, { dot, name: primary ? "Main" : w.name, branch, nested }), `space-${w.id}`, t)
       .role("button").accessibility_label(w.name)
       // The shown space is a white card, as the active tab and its terminal; hovered, it takes the outline too.
       .when(on && this.hovered !== `space-${w.id}`, (el) => el.bg(t.background).border_color(t.border))
