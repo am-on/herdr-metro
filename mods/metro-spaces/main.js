@@ -17,7 +17,7 @@ const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const tilde = (path) => (path && (path === home() || path.startsWith(home() + "/")) ? "~" + path.slice(home().length) : path);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 
-// Headings are bold capitals in the system font, which has weights (the UI font, Geist, has one).
+// Headings are bold in the system font, which has weights (the UI font, Geist, has one).
 const BOLD = ".SystemUIFont";
 
 function find(node, id) {
@@ -444,13 +444,13 @@ export default class Spaces extends View {
   // The rows, under a header per machine once one isn't this computer.
   grouped(t) {
     const rows = this.ordered();
-    const draw = (r) => r.kind === "project" ? this.projectRow(r, t) : r.kind === "checkout" ? this.checkoutRow(r, t) : this.row(r, t);
+    const draw = (r, first) => r.kind === "project" ? this.projectRow(r, t, first) : r.kind === "checkout" ? this.checkoutRow(r, t) : this.row(r, t);
     // A project's own rows (its checkouts and spaces) go in its branch, under its row.
     const tree = (list) => {
       const out = [];
       for (let i = 0; i < list.length; i++) {
         const r = list[i];
-        out.push(draw(r));
+        out.push(draw(r, out.length === 0));
         if (r.kind !== "project") continue;
         const kids = [];
         while (i + 1 < list.length && list[i + 1].kind !== "project" && (list[i + 1].kind !== "space" || list[i + 1].nested)) kids.push(draw(list[++i]));
@@ -509,7 +509,7 @@ export default class Spaces extends View {
       .children(kids);
   }
 
-  projectRow(r, t) {
+  projectRow(r, t, first) {
     const { w, g, count, closed } = r;
     const id = `repo-${g.repo}`, lit = this.hovered === id, folded = !closed && this.foldedRepos.has(g.repo);
     const fill = this.fill(w, t, closed?.color), isKept = Boolean(closed) || this.kept.some((k) => k.key === g.repo);
@@ -524,7 +524,7 @@ export default class Spaces extends View {
     const dragged = this.dragging === g.repo && this.dropOn && this.dropOn !== g.repo;
     const target = this.dragging && this.dropOn === g.repo && this.dragging !== g.repo;
     const down = target && this.projectKeys.indexOf(this.dragging) < this.projectKeys.indexOf(g.repo);
-    return h_flex().id(id).relative().h(36).mt(10).flex_none().px(8).gap(10).items_center().rounded(8).font_weight(700)
+    return h_flex().id(id).relative().h(36).when(!first, el => el.mt(10)).flex_none().px(8).gap(10).items_center().rounded(8).font_weight(700)
       .role("button").accessibility_label(closed ? `Open ${name}` : folded ? `Expand ${name}` : `Collapse ${name}`)
       .on_hover((over, cx) => { if (over) this.hovered = id; else if (this.hovered === id) this.hovered = null; cx.notify(); })
       // Drag a project's row onto another to move it there; the line shows where it lands.
@@ -683,9 +683,9 @@ export default class Spaces extends View {
     }
     if (changed) setShared("space.colors", kept);
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      // Bold small capitals, as the agents list titles its sections.
+      // Bold, as the agents list titles its sections, a size up as the heading of the half; the first project sits right under it.
       .child(h_flex().id("spaces-heading").mt(6).h(32).flex_none().pl(16).pr(10).items_center().justify_between().text_size(13).text_color(t.dim)
-        .child(div().text_size(11).font_family(BOLD).font_weight(700).text_color(t.muted).child("PROJECTS"))
+        .child(div().text_size(13).font_family(BOLD).font_weight(700).text_color(t.muted).child("Projects"))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).role("button").accessibility_label("New space").hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/metro-chrome/icons/plus.svg").size(14))))
       // The list scrolls under an always-visible 10px bar on its right edge.

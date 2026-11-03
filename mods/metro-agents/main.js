@@ -14,7 +14,7 @@ function find(node, id) {
   }
   return null;
 }
-// Section headings are bold capitals in the system font, which has weights (the UI font, Geist, has one).
+// Section headings are bold in the system font, which has weights (the UI font, Geist, has one).
 const BOLD = ".SystemUIFont";
 // A section heading's mark: the agents' state marks, standing still and full size.
 const headingMark = (t, kind) => {
@@ -405,7 +405,7 @@ export default class Agents extends View {
       else groups.push({ id, label: SECTION[r], status: SECTION_STATUS[r], members: [a] });
     }
 
-    // A section's header, its still state mark and bold small capitals in its status color; it folds the section. Later ones keep 8px above.
+    // A section's header, its still state mark and its name in bold, in its status color; it folds the section. Later ones keep 8px above.
     const header = (g, i) => {
       const initial = false;
       const open = !this.isFolded(g.id, initial);
@@ -419,9 +419,9 @@ export default class Agents extends View {
         .items_center()
         .text_size(11)
         .on_click((_e, cx) => this.toggleFold(g.id, cx, initial))
-        // Working is green, as its spinner; Idle's theme color is a faint grey meant for marks, so its header is muted.
+        // Working is green, as its spinner; Idle's theme color is a faint grey meant for marks, so its header is a dark grey.
         .child(headingMark(t, g.status))
-        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_color({ check: t.accent, working: t.ansi2, idle: t.muted }[g.status] ?? t[g.status] ?? t.dim).child(g.label.toUpperCase()))
+        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_size(13).text_color({ check: t.accent, working: t.ansi2, idle: t.foreground + "bb" }[g.status] ?? t[g.status] ?? t.dim).child(g.label))
         // A count only where the rows don't show it at a glance: past five, or folded. Ringed, as Spaces' hidden worktrees.
         .when(g.members.length > 5 || !open, (el) => el.child(div().size(22).flex_none().rounded_full().border(1).border_color(t.border)
           .flex().items_center().justify_center().text_size(11).text_color(t.muted).child(String(g.members.length))))
