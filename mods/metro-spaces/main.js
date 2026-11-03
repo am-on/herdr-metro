@@ -688,11 +688,11 @@ export default class Spaces extends View {
         .child(div().text_size(13).font_family(BOLD).font_weight(700).text_color(t.muted).child("Projects"))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).role("button").accessibility_label("New space").hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/metro-chrome/icons/plus.svg").size(14))))
-      // The list scrolls under an always-visible 10px bar on its right edge.
+      // The list scrolls beside an always-visible 10px bar on its right edge, 5px clear of it.
       .child(div().relative().flex_1().min_h(0)
         .child(v_flex().id("space-list").size_full().overflow_y_scroll()
           .on_mouse_up("left", (_e, cx) => { this.pressed = null; this.dragging = null; this.dropOn = null; cx.notify(); })
-          .child(v_flex().id("space-content").w_full().flex_none().px(8).pb(8)
+          .child(v_flex().id("space-content").w_full().flex_none().pl(8).pr(15).pb(8)
             .children(this.grouped(t))))
         .child(div().absolute().top(0).bottom(0).right(0).w(10).child(Scrollbar.vertical("space-list").size_full().mode("always"))));
   }

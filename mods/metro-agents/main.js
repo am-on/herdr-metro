@@ -560,9 +560,9 @@ export default class Agents extends View {
       .when(list.length === 0, (el) =>
         el.child(div().px(16).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
-      // The list scrolls under an always-visible 10px bar on its right edge.
+      // The list scrolls beside an always-visible 10px bar on its right edge, 5px clear of it.
       .child(div().relative().flex_1().min_h(0)
-        .child(v_flex().id("ag-list").size_full().px(8).overflow_y_scroll()
+        .child(v_flex().id("ag-list").size_full().pl(8).pr(15).overflow_y_scroll()
           .child(div().relative().w_full().h(height).flex_none().children(boxes)))
         .child(div().absolute().top(0).bottom(0).right(0).w(10).child(Scrollbar.vertical("ag-list").size_full().mode("always"))));
   }
