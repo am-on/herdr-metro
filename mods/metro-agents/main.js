@@ -29,7 +29,7 @@ const headingMark = (t, kind) => {
 // How long a box takes to slide to its new place, and to fade in or out.
 const MOVE = { duration: 260, easing: "ease-in-out" };
 const FADE = 180;
-// How long a finished agent you've looked at waits, once you've left it, before dropping to Idle.
+// How long a finished agent you've looked at waits, once you've left it and its rows, before dropping to Idle.
 const LINGER = 1000;
 const RANK = { blocked: 4, done: 3, check: 2.5, working: 2, idle: 1 };
 // "Check again": an agent the person marked to come back to, a label on its terminal until the agent works again (metro-tabs clears it).
@@ -104,7 +104,7 @@ export default class Agents extends View {
     this.ghosts = new Map();
     this.born = {};
     this.started = Date.now();
-    // Finished agents still shown in Done: held while done or focused, then when let go; see hold().
+    // Finished agents still shown in Done: held while done, focused or a row is hovered, then when let go; see hold().
     this.doneAt = {};
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
@@ -162,13 +162,13 @@ export default class Agents extends View {
     return this.changed[a.address]?.at ?? 0;
   }
 
-  // Looking at a done agent makes it idle; it stays with Done while it's focused and drops to Idle a second after
-  // you leave it. Any other change moves it at once.
+  // Looking at a done agent makes it idle; it stays with Done while it's focused or the pointer is on a row of the
+  // list (one just clicked), and drops to Idle a second after both end. Any other change moves it at once.
   hold(list, now) {
     const lingering = [];
     for (const a of list) {
       const d = this.doneAt[a.address];
-      if (a.status === "done" || (d && a.status === "idle" && a.focused)) this.doneAt[a.address] = { held: true };
+      if (a.status === "done" || (d && a.status === "idle" && (a.focused || this.hovered))) this.doneAt[a.address] = { held: true };
       else if (a.status !== "idle" || !d) delete this.doneAt[a.address];
       // The wait starts on the render that sees it let go.
       else if (d.held) { this.doneAt[a.address] = { at: now }; lingering.push(LINGER); }
