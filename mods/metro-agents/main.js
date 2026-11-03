@@ -14,6 +14,18 @@ function find(node, id) {
   }
   return null;
 }
+// Section headings are bold capitals in the system font, which has weights (the UI font, Geist, has one).
+const BOLD = ".SystemUIFont";
+// A section heading's mark: the agents' state marks, standing still and full size.
+const headingMark = (t, kind) => {
+  const box = (el) => div().size(14).flex_none().flex().items_center().justify_center().child(el);
+  if (kind === "working") return box(div().size(8).rounded_full().bg(t.ansi2));
+  if (kind === "blocked") return box(div().size(8).rounded_full().bg(t.blocked));
+  if (kind === "done") return box(div().size(8).rounded_full().bg(t.done));
+  if (kind === "idle") return box(div().size(8).rounded_full().border(1.5).border_color(t.dim));
+  if (kind === "check") return box(svg("mods/metro-chrome/icons/bookmark-filled.svg").size(11).text_color(t.accent));
+  return null;
+};
 const RANK = { blocked: 4, done: 3, check: 2.5, working: 2, idle: 1 };
 // "Check again": an agent the person marked to come back to, a label on its terminal until the agent works again (metro-tabs clears it).
 const CHECK = "metro.check";
@@ -393,7 +405,7 @@ export default class Agents extends View {
       else groups.push({ id, label: SECTION[r], status: SECTION_STATUS[r], members: [a] });
     }
 
-    // A section's header, small capitals in its status color; it folds the section. Later ones keep 8px above.
+    // A section's header, its still state mark and bold small capitals in its status color; it folds the section. Later ones keep 8px above.
     const header = (g, i) => {
       const initial = false;
       const open = !this.isFolded(g.id, initial);
@@ -408,7 +420,8 @@ export default class Agents extends View {
         .text_size(11)
         .on_click((_e, cx) => this.toggleFold(g.id, cx, initial))
         // Working is green, as its spinner; Idle's theme color is a faint grey meant for marks, so its header is muted.
-        .child(div().min_w(0).truncate().text_color({ check: t.accent, working: t.ansi2, idle: t.muted }[g.status] ?? t[g.status] ?? t.dim).child(g.label.toUpperCase()))
+        .child(headingMark(t, g.status))
+        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_color({ check: t.accent, working: t.ansi2, idle: t.muted }[g.status] ?? t[g.status] ?? t.dim).child(g.label.toUpperCase()))
         // A count only where the rows don't show it at a glance: past five, or folded. Ringed, as Spaces' hidden worktrees.
         .when(g.members.length > 5 || !open, (el) => el.child(div().size(22).flex_none().rounded_full().border(1).border_color(t.border)
           .flex().items_center().justify_center().text_size(11).text_color(t.muted).child(String(g.members.length))))

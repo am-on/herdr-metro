@@ -17,6 +17,9 @@ const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const tilde = (path) => (path && (path === home() || path.startsWith(home() + "/")) ? "~" + path.slice(home().length) : path);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 
+// Headings are bold capitals in the system font, which has weights (the UI font, Geist, has one).
+const BOLD = ".SystemUIFont";
+
 function find(node, id) {
   if (node?.id === id) return node;
   for (const child of node?.children ?? []) {
@@ -680,9 +683,9 @@ export default class Spaces extends View {
     }
     if (changed) setShared("space.colors", kept);
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      // Small capitals, as the agents list titles its sections.
+      // Bold small capitals, as the agents list titles its sections.
       .child(h_flex().id("spaces-heading").mt(6).h(32).flex_none().pl(16).pr(10).items_center().justify_between().text_size(13).text_color(t.dim)
-        .child(div().text_size(11).text_color(t.muted).child("PROJECTS"))
+        .child(div().text_size(11).font_family(BOLD).font_weight(700).text_color(t.muted).child("PROJECTS"))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).role("button").accessibility_label("New space").hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/metro-chrome/icons/plus.svg").size(14))))
       // The list scrolls under an always-visible 10px bar on its right edge.
