@@ -49,6 +49,25 @@ function icon(p, size, color) {
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
 
+// At the right of a branch, what isn't on origin, as metro-spaces draws it (it runs git and shares each space's
+// in `projects.git`): commits to push and to pull in the text's grey, then the uncommitted lines in green and red.
+function gitMarks(t, g, id) {
+  const n = (k, one) => `${k} ${k === 1 ? "commit" : "commits"} ${one}`;
+  const arrows = [
+    g.ahead > 0 && div().id(`ahead-${id}`).child(`↑${g.ahead}`)
+      .tooltip(g.rewritten ? "Amended or rebased since the last push: force-push to update origin" : n(g.ahead, "not pushed")),
+    g.behind > 0 && !g.rewritten && div().id(`behind-${id}`).child(`↓${g.behind}`).tooltip(n(g.behind, "to pull")),
+  ].filter(Boolean);
+  const lines = [
+    g.add > 0 && div().text_color(t.ansi2).child(`+${g.add}`),
+    g.del > 0 && div().text_color(t.ansi1).child(`−${g.del}`),
+  ].filter(Boolean);
+  return [
+    arrows.length && h_flex().flex_none().gap(4).text_color(t.muted).children(arrows),
+    lines.length && h_flex().flex_none().gap(4).children(lines),
+  ].filter(Boolean);
+}
+
 export default class Agents extends View {
   init(_props) {
     this.folded = JSON.parse(localStorage.getItem("folded") ?? "{}");
@@ -253,6 +272,7 @@ export default class Agents extends View {
     }
 
     const branchOf = new Map(panes().filter((p) => p.terminal).map((p) => [p.terminal, p.branch]));
+    const gitOf = shared("projects.git") ?? {};
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 14, t.foreground);
       const more = detail.get(a.address);
@@ -303,6 +323,8 @@ export default class Agents extends View {
       const marked = canMark && this.checked.has(a.address);
       // Two lines, as Spaces draws a worktree: the mark, icon and name, then the branch it's on.
       const branch = branchOf.get(a.address);
+      // Its space's marks, when it's on that checkout's branch.
+      const git = branch && gitOf[a.space]?.branch === branch ? gitOf[a.space] : null;
       return v_flex()
         .id(`ag-${a.address}`)
         .relative()
@@ -344,7 +366,9 @@ export default class Agents extends View {
         .child(h_flex().id(`controls-${a.address}`).flex_none().items_center().gap(4)
           .when(folded, el => el.child(fold(a, subs)))
           .when(this.hovered === a.address, el => el.child(pin).child(close))))
-        .when(Boolean(branch), el => el.child(div().w_full().min_w(0).pl(28).truncate().text_size(12).text_color(t.dim).child(branch)));
+        .when(Boolean(branch), el => el.child(h_flex().w_full().min_w(0).pl(28).gap(8).items_center().text_size(12).text_color(t.dim)
+          .child(div().flex_1().min_w(0).truncate().child(branch))
+          .when(Boolean(git), el => el.children(gitMarks(t, git, a.address)))));
     };
 
     // Priority sections in list order, pinned agents first in their own.

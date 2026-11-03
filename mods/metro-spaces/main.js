@@ -56,6 +56,25 @@ const ink = (hex) => {
   return 0.299 * r + 0.587 * g + 0.114 * b > 170 ? "#1f2328" : "#ffffff";
 };
 
+// At the right of a branch, what isn't on origin: commits to push and to pull in the text's grey (amended or rebased
+// since the push: only to push, by force), then the uncommitted lines in green and red. The same in metro-agents.
+function gitMarks(t, g, id) {
+  const n = (k, one) => `${k} ${k === 1 ? "commit" : "commits"} ${one}`;
+  const arrows = [
+    g.ahead > 0 && div().id(`ahead-${id}`).child(`↑${g.ahead}`)
+      .tooltip(g.rewritten ? "Amended or rebased since the last push: force-push to update origin" : n(g.ahead, "not pushed")),
+    g.behind > 0 && !g.rewritten && div().id(`behind-${id}`).child(`↓${g.behind}`).tooltip(n(g.behind, "to pull")),
+  ].filter(Boolean);
+  const lines = [
+    g.add > 0 && div().text_color(t.ansi2).child(`+${g.add}`),
+    g.del > 0 && div().text_color(t.ansi1).child(`−${g.del}`),
+  ].filter(Boolean);
+  return [
+    arrows.length && h_flex().flex_none().gap(4).text_color(t.muted).children(arrows),
+    lines.length && h_flex().flex_none().gap(4).children(lines),
+  ].filter(Boolean);
+}
+
 export default class Spaces extends View {
   init(_props, cx) {
     this.git = {}; // where() -> { name, branch, ahead, behind, rewritten, add, del, repo, top, linked }, null: not a repo
@@ -158,6 +177,7 @@ export default class Spaces extends View {
       }
       const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
       for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
+      this.publish();
       this.refreshing = false;
       cx.notify();
     });
@@ -207,6 +227,18 @@ export default class Spaces extends View {
       this.git[key] ??= null;
       this.unsure.add(key);
     }
+  }
+
+  // Each space's marks for metro-agents, in shared `projects.git`, only when they changed. Not without spaces
+  // (`herdr-app check`), or a check would wipe them.
+  publish() {
+    const sp = spaces(), ps = panes(), out = {};
+    if (!sp.length) return;
+    for (const w of sp) {
+      const g = this.git[where(w, ps)];
+      if (g && (g.ahead || g.behind || g.add || g.del)) out[w.id] = { branch: g.branch, ahead: g.ahead, behind: g.behind, rewritten: g.rewritten, add: g.add, del: g.del };
+    }
+    if (JSON.stringify(out) !== JSON.stringify(shared("projects.git") ?? {})) setShared("projects.git", out);
   }
 
   // Uncommitted lines, as a review of Uncommitted counts them: tracked files against HEAD, every line of an untracked one.
@@ -590,20 +622,9 @@ export default class Spaces extends View {
       : w.status === "done" ? div().size(7).rounded_full().bg(t.done)
       : w.status ? div().size(7).rounded_full().border(1.5).border_color(t.dim)
       : null;
-    // The branch, then at the right what isn't on origin: commits pushed or pulled in the text's grey, the
-    // uncommitted lines in green and red, as metro-review counts them.
     const branch = g ? h_flex().flex_1().min_w(0).gap(8).items_center()
       .child(div().flex_1().min_w(0).truncate().child(g.branch ?? "detached"))
-      .when(Boolean(g.rewritten), (el) => el.child(div().id(`amended-${w.id}`).flex_none().text_color(t.muted)
-        .tooltip("Amended or rebased since the last push: force-push to update origin").child("amended")))
-      .when(!g.rewritten && (g.ahead > 0 || g.behind > 0), (el) => el.child(h_flex().flex_none().gap(4).text_color(t.muted)
-        .when(g.ahead > 0, (el) => el.child(div().id(`ahead-${w.id}`)
-          .tooltip(`${g.ahead} ${g.ahead === 1 ? "commit" : "commits"} not pushed`).child(`↑${g.ahead}`)))
-        .when(g.behind > 0, (el) => el.child(div().id(`behind-${w.id}`)
-          .tooltip(`${g.behind} ${g.behind === 1 ? "commit" : "commits"} to pull`).child(`↓${g.behind}`)))))
-      .when(g.add > 0 || g.del > 0, (el) => el.child(h_flex().flex_none().gap(4)
-        .when(g.add > 0, (el) => el.child(div().text_color(t.ansi2).child(`+${g.add}`)))
-        .when(g.del > 0, (el) => el.child(div().text_color(t.ansi1).child(`−${g.del}`))))) : null;
+      .children(gitMarks(t, g, w.id)) : null;
     // Under its folder's or repo's title, a space is its name.
     return this.lift(this.card(`space-${w.id}`, t, { dot, name: primary ? "Main" : w.name, branch, nested }), `space-${w.id}`, t)
       .role("button").accessibility_label(w.name)
