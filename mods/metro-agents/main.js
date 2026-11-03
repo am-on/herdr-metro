@@ -26,6 +26,13 @@ const headingMark = (t, kind) => {
   if (kind === "check") return box(svg("mods/metro-chrome/icons/bookmark-filled.svg").size(11).text_color(t.accent));
   return null;
 };
+// How long a box takes to slide to its new place, and to fade in or out.
+const MOVE = { duration: 260, easing: "ease-in-out" };
+const FADE = 180;
+// How long a finished agent you've looked at waits, once you've left it and the list, before dropping to Idle.
+const LINGER = 1000;
+// How long a still pointer over the list keeps holding it.
+const POINTER = 3000;
 const RANK = { blocked: 4, done: 3, check: 2.5, working: 2, idle: 1 };
 // "Check again": an agent the person marked to come back to, a label on its terminal until the agent works again (metro-tabs clears it).
 const CHECK = "metro.check";
@@ -37,6 +44,8 @@ const kidStatus = (k, listed) => {
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
 const SECTION = { 4: "Needs you", 3: "Done", 2.5: "Check again", 2: "Working", 1: "Idle" };
+// Where each section sits, top first: Done right above Idle, so an agent you've looked at drops to the next section.
+const PLACE = { 4: 5, 2: 4, 2.5: 3, 3: 2, 1: 1 };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2.5: "check", 2: "working", 1: "idle" };
 
 // What a stored color name looks like on an avatar (the same in every mod
@@ -92,6 +101,13 @@ function gitMarks(t, g, id) {
 export default class Agents extends View {
   init(_props) {
     this.folded = JSON.parse(localStorage.getItem("folded") ?? "{}");
+    // Each box's measured height, by key; what left the list, fading where it was.
+    this.heights = {};
+    this.ghosts = new Map();
+    this.born = {};
+    this.started = Date.now();
+    // Finished agents still shown in Done: held while done, focused or under a pointer on the list, then when let go; see hold().
+    this.doneAt = {};
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
     // Older installs kept pins in this list's storage; move them over once.
@@ -148,19 +164,28 @@ export default class Agents extends View {
     return this.changed[a.address]?.at ?? 0;
   }
 
-  // Looking at a done agent makes it idle; it stays with Done until you leave
-  // it rather than drop away under you. Any other change moves it at once.
-  hold(list) {
-    const cur = list.find((a) => a.focused);
-    const same = cur && cur.address === this.held?.address;
-    // Arriving, or any change but done turning idle, sets what it was.
-    if (!same || cur.status !== "idle") this.held = cur ? { address: cur.address, rank: RANK[cur.status] ?? 0 } : null;
+  // Looking at a done agent makes it idle; it stays with Done while it's focused or the pointer is over the list,
+  // and drops to Idle a second after both end, so it never moves under the pointer. Any other change moves it at once.
+  hold(list, now) {
+    const lingering = [];
+    // The pointer counts while it moved over the list lately: a pointer leaving the window may never say it left.
+    const pointer = this.overList && now - (this.movedAt ?? 0) < POINTER;
+    if (pointer) lingering.push(POINTER - (now - this.movedAt));
+    for (const a of list) {
+      const d = this.doneAt[a.address];
+      if (a.status === "done" || (d && a.status === "idle" && (a.focused || pointer))) this.doneAt[a.address] = { held: true };
+      else if (a.status !== "idle" || !d) delete this.doneAt[a.address];
+      // The wait starts on the render that sees it let go.
+      else if (d.held) { this.doneAt[a.address] = { at: now }; lingering.push(LINGER); }
+      else if (now - d.at < LINGER) lingering.push(LINGER - (now - d.at));
+      else delete this.doneAt[a.address];
+    }
+    return lingering.length && Object.keys(this.doneAt).some((k) => list.some((a) => a.address === k && a.status === "idle")) ? Math.min(...lingering) : null;
   }
 
   rank(a) {
     if (this.checked?.has(a.address) && a.status !== "working" && a.status !== "blocked") return RANK.check;
-    const sawDone = a.address === this.held?.address && this.held.rank === RANK.done && a.status === "idle";
-    return sawDone ? RANK.done : RANK[a.status] ?? 0;
+    return a.status === "idle" && this.doneAt[a.address] != null ? RANK.done : RANK[a.status] ?? 0;
   }
 
   peek(addr) {
@@ -236,30 +261,30 @@ export default class Agents extends View {
     const shown = focused()?.agent;
     const now = Date.now();
     this.track(list, now);
-    this.hold(list);
+    // A finished agent waiting to drop to Idle gets a render when its wait ends.
+    const wait = this.hold(list, now);
+    if (wait != null && !(this.lingerTick && this.lingerAt <= now + wait)) {
+      this.lingerTick?.cancel();
+      this.lingerAt = now + wait;
+      this.lingerTick = cx.timer.after(wait + 30, (cx) => { this.lingerTick = null; cx.notify(); });
+    }
     const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
     const sectionOf = (a) => rankOf(a) || RANK.idle;
-    list = [...list].sort((x, y) => sectionOf(y) - sectionOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
+    const placeOf = (a) => PLACE[sectionOf(a)] ?? 0;
+    list = [...list].sort((x, y) => placeOf(y) - placeOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     // Within a section an agent joins the others of its project (as Projects groups spaces: a repo's worktrees
     // together), projects in the order of their most recent agent.
     const projects = shared("projects.of") ?? {};
     const projectOf = (a) => projects[a.space] ?? { key: a.space, name: a.space_name, lead: a.space };
     const firstOf = new Map();
     list.forEach((a, i) => { const k = `${sectionOf(a)}|${projectOf(a).key}`; if (!firstOf.has(k)) firstOf.set(k, i); });
-    list.sort((x, y) => sectionOf(y) - sectionOf(x) || firstOf.get(`${sectionOf(x)}|${projectOf(x).key}`) - firstOf.get(`${sectionOf(y)}|${projectOf(y).key}`));
+    list.sort((x, y) => placeOf(y) - placeOf(x) || firstOf.get(`${sectionOf(x)}|${projectOf(x).key}`) - firstOf.get(`${sectionOf(y)}|${projectOf(y).key}`));
     this.prunePins(all);
     const pinned = this.pins.map((p) => list.find((a) => a.address === p)).filter(Boolean);
     const rest = list.filter((a) => !this.pins.includes(a.address));
     list = [...pinned, ...rest];
     setAgentOrder(list.map((a) => a.address));
-
-    const withKids = (a, i) => {
-      const subs = this.tree(all, a.address);
-      const r = row(a, i, subs);
-      if (this.isFolded(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown))];
-    };
 
     // Only folded rows show it: open, the indented children below say so, and the icon folds them.
     // Just a dim count; the row's status carries any hidden child's urgency.
@@ -388,7 +413,8 @@ export default class Agents extends View {
         .child(h_flex().flex_1().min_w(0).gap(8).items_center()
           .child(div().min_w(0).truncate().text_color(idle ? t.muted : t.foreground).child(name)))
         .when(Boolean(machine), el => el.child(div().text_size(11).text_color(t.dim).child(machine)))
-        .child(h_flex().id(`controls-${a.address}`).flex_none().items_center().gap(4)
+        // The controls keep the line's 18px, so hovering never changes a row's height.
+        .child(h_flex().id(`controls-${a.address}`).h(18).flex_none().items_center().gap(4)
           .when(folded, el => el.child(fold(a, subs)))
           .when(this.hovered === a.address, el => el.child(pin).child(close))))
         .when(Boolean(branch), el => el.child(h_flex().w_full().min_w(0).pl(28).gap(8).items_center().text_size(12).text_color(t.dim)
@@ -450,20 +476,83 @@ export default class Agents extends View {
           .text_color(fill?.startsWith("#") ? ink(fill) : "#ffffff").child(letter))
         .child(div().min_w(0).truncate().text_size(13).text_color(t.foreground).child(name));
     };
-    const rail = (g, run) => v_flex().id(`${g.id}-rail-${run[0].address}`).relative().flex_none().pl(26)
-      .child(div().absolute().left(16).top(-2).bottom(4).w(2).rounded(1).bg(fillOf(run[0]) + "73"))
-      .children(run.flatMap(withKids));
+    // The list is laid out by hand: every heading, project title, rail and row is a box at its own `top`, keyed so the
+    // same box moves when its agent changes section, and slides there.
+    const items = [];
+    const put = (key, make, est, left = 0) => items.push({ key, make, est, left });
     const bySpace = (g, as) => {
       const runs = [];
       for (const a of as) { if (runs.at(-1) && projectOf(runs.at(-1)[0]).key === projectOf(a).key) runs.at(-1).push(a); else runs.push([a]); }
-      return runs.flatMap((run, i) => [spaceTitle(g, run[0], i === 0), rail(g, run)]);
+      const used = {};
+      runs.forEach((run, ri) => {
+        const pk = projectOf(run[0]).key, n = used[pk] = (used[pk] ?? 0) + 1;
+        const key = `${g.id}-${pk}${n > 1 ? `-${n}` : ""}`;
+        put(`title-${key}`, () => spaceTitle(g, run[0], ri === 0), ri === 0 ? 24 : 32);
+        const from = items.length;
+        run.forEach((a, i) => {
+          const subs = this.tree(all, a.address);
+          put(`ag-${a.address}`, () => row(a, i, subs), branchOf.get(a.address) ? 54 : 32, 26);
+          if (!this.isFolded(a.address)) for (const sub of subs) put(`sub-${sub.t.address}`, () => this.subRow(t, sub, shown), 32, 26);
+        });
+        items.push({ key: `rail-${key}`, rail: true, from, to: items.length - 1, color: fillOf(run[0]) + "73" });
+      });
     };
-    const members = (g) => {
+    groups.forEach((g, i) => {
+      put(`head-${g.id}`, () => header(g, i), i > 0 ? 32 : 24);
+      if (this.isFolded(g.id, false)) return;
       if (g.id !== "sec-1" || g.members.length <= IDLE_SHOWN) return bySpace(g, g.members);
-      const shown = this.allIdle ? g.members : g.members.slice(0, IDLE_SHOWN);
-      return [...bySpace(g, shown), more(g, g.members.length - IDLE_SHOWN)];
+      bySpace(g, this.allIdle ? g.members : g.members.slice(0, IDLE_SHOWN));
+      put(`${g.id}-more`, () => more(g, g.members.length - IDLE_SHOWN), 28);
+    });
+    let y = 0;
+    for (const it of items) if (!it.rail) { it.top = y; y += this.heights[it.key] ?? it.est; }
+    // A rail runs from 2px above its first row to 4px above the end of its last.
+    for (const it of items) if (it.rail) {
+      const first = items[it.from], last = items[it.to];
+      it.top = first.top - 2;
+      it.h = last.top + (this.heights[last.key] ?? last.est) - first.top - 2;
+    }
+    const height = y;
+
+    // What left the list fades where it was; what arrived fades in once it has been drawn invisible.
+    const keys = new Set(items.map((it) => it.key));
+    if (this.prev) {
+      for (const [k, it] of this.prev) if (!keys.has(k) && !this.ghosts.has(k)) this.ghosts.set(k, { ...it, until: now + FADE + 60 });
+      for (const it of items) if (!this.prev.has(it.key)) { it.arriving = true; this.born[it.key] = now; }
+    }
+    // What arrived fades in once what moved is nearly in place, so it never shows over a box still sliding by.
+    for (const it of items) it.late = now - (this.born[it.key] ?? 0) < MOVE.duration + FADE;
+    for (const k of Object.keys(this.born)) if (now - this.born[k] > 2000) delete this.born[k];
+    for (const [k, g] of this.ghosts) if (keys.has(k) || g.until <= now) this.ghosts.delete(k);
+    this.prev = new Map(items.map((it) => [it.key, it]));
+    for (const k of Object.keys(this.heights)) if (!keys.has(k) && !this.ghosts.has(k)) delete this.heights[k];
+    if ((this.ghosts.size || items.some((it) => it.arriving)) && !this.tick) {
+      this.tick = cx.timer.after(items.some((it) => it.arriving) ? 20 : FADE + 80, (cx) => { this.tick = null; cx.notify(); });
+    }
+    // Right after the list starts, boxes snap to their measured heights; later every change slides, so a height
+    // corrected mid-slide never cuts the other slides short.
+    const move = now - this.started < 800 ? 0 : MOVE;
+    const box = (it, gone) => {
+      const shown = !gone && !it.arriving;
+      const fade = it.late && !gone ? { duration: FADE, delay: MOVE.duration * 0.7 } : FADE;
+      if (it.rail) return div().id(`box-${it.key}`).absolute().left(16).top(it.top).w(2).h(Math.max(0, it.h)).rounded(1).bg(it.color)
+        .opacity(shown ? 1 : 0).transition("top", move).transition("height", move).transition("opacity", fade);
+      // Boxes are opaque in the sidebar's color, so one sliding past another hides behind it rather than through it.
+      return div().id(`box-${it.key}`).absolute().left(it.left).right(0).top(it.top).bg(t.chrome)
+        .opacity(shown ? 1 : 0).transition("top", move).transition("opacity", fade)
+        .on_size_change((size, cx) => {
+          if (Math.abs((this.heights[it.key] ?? -1) - size.height) < 0.5) return;
+          this.heights[it.key] = size.height;
+          cx.notify();
+        })
+        .child(it.make());
     };
-    const rows = groups.flatMap((g, i) => [header(g, i), ...(this.isFolded(g.id, false) ? [] : members(g))]);
+    // Drawn bottom to top: what is fading out, rails, headings and titles, then agents, which pass over the rest.
+    const layer = (it) => (it.rail ? 0 : it.key.startsWith("ag-") || it.key.startsWith("sub-") ? 2 : 1);
+    const boxes = [
+      ...[...this.ghosts.values()].map((it) => box(it, true)),
+      ...[0, 1, 2].flatMap((l) => items.filter((it) => layer(it) === l).map((it) => box(it, false))),
+    ];
 
     return v_flex()
       .id("metro-agents-root")
@@ -478,7 +567,10 @@ export default class Agents extends View {
       )
       // The list scrolls under an always-visible 10px bar on its right edge.
       .child(div().relative().flex_1().min_h(0)
-        .child(v_flex().id("ag-list").size_full().px(8).overflow_y_scroll().children(rows))
+        .child(v_flex().id("ag-list").size_full().px(8).overflow_y_scroll()
+          .on_hover((over, cx) => { this.overList = over; this.movedAt = Date.now(); cx.notify(); })
+          .on_mouse_move(() => { this.movedAt = Date.now(); })
+          .child(div().relative().w_full().h(height).flex_none().children(boxes)))
         .child(div().absolute().top(0).bottom(0).right(0).w(10).child(Scrollbar.vertical("ag-list").size_full().mode("always"))));
   }
 }

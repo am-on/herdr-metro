@@ -6,7 +6,7 @@ A layout for the [Herdr app](https://herdr.dev) for running many coding agents a
 
 ## What you get
 
-**Agents, by what they need from you.** The sidebar's top half sorts every agent into Needs you, Done, Check again, Working and Idle, each grouped under its project. A badge on the agent's logo shows its state: red when it's waiting on you, blue when it finished while you weren't looking, a breathing green dot while it works. Mark a finished agent **Check again** and it keeps a bookmark until it works again, even across restarts.
+**Agents, by what they need from you.** The sidebar's top half sorts every agent into Needs you, Working, Check again, Done and Idle, each grouped under its project. A badge on the agent's logo shows its state: red when it's waiting on you, blue when it finished while you weren't looking, a breathing green dot while it works. Mark a finished agent **Check again** and it keeps a bookmark until it works again, even across restarts.
 
 **Projects as lines.** Below, each repo is a line in its own color. Its stops are the main checkout and every worktree, with the branch under each. Worktrees with nothing open stay listed, dimmed, so you can open them again. Pin a project to keep it when everything in it is closed, drag projects to reorder them, double-click to rename. **+** starts a worktree from a picker of the repo's open pull requests and branches, forks' PRs included.
 
