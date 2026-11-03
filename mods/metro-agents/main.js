@@ -108,6 +108,10 @@ export default class Agents extends View {
     this.doneAt = {};
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
+    // Each agent's section and its place in it (lowest first), kept across restarts; see slot().
+    this.slots = JSON.parse(localStorage.getItem("slots") ?? "{}");
+    // When each agent and project title last changed section (ms): while it slides, it's drawn over the rest.
+    this.movedAt = {};
     // Older installs kept pins in this list's storage; move them over once.
     if (shared("agents.pins") == null && localStorage.getItem("pins")) setShared("agents.pins", JSON.parse(localStorage.getItem("pins")));
   }
@@ -162,6 +166,30 @@ export default class Agents extends View {
     return this.changed[a.address]?.at ?? 0;
   }
 
+  // Places agents that changed section: one arriving from a section above joins the top of its new one and one
+  // from below joins the bottom, so it slides the shortest way; an agent not seen before goes by its last change.
+  slot(list, sectionOf) {
+    let dirty = false;
+    const stays = list.filter((a) => this.slots[a.address]?.s === sectionOf(a));
+    for (const a of list) {
+      const s = sectionOf(a), was = this.slots[a.address];
+      if (was?.s === s) continue;
+      const ks = stays.filter((b) => sectionOf(b) === s).map((b) => this.slots[b.address].k);
+      const k = !was ? -this.since(a) : !ks.length ? 0 : PLACE[was.s] > PLACE[s] ? Math.min(...ks) - 1 : Math.max(...ks) + 1;
+      if (was) this.movedAt[a.address] = Date.now();
+      this.slots[a.address] = { s, k };
+      stays.push(a);
+      dirty = true;
+    }
+    if (!dirty) return;
+    for (const k of Object.keys(this.slots)) if (!this.changed[k]) delete this.slots[k];
+    localStorage.setItem("slots", JSON.stringify(this.slots));
+  }
+
+  key(a) {
+    return this.slots[a.address]?.k ?? 0;
+  }
+
   // Looking at a done agent makes it idle; it stays with Done while it's focused or the pointer is on a row of the
   // list (one just clicked), and drops to Idle a second after both end. Any other change moves it at once.
   hold(list, now) {
@@ -176,6 +204,26 @@ export default class Agents extends View {
       else delete this.doneAt[a.address];
     }
     return lingering.length && Object.keys(this.doneAt).some((k) => list.some((a) => a.address === k && a.status === "idle")) ? Math.min(...lingering) : null;
+  }
+
+  // The key of each project run's title and rail. A run keeps its key while it stays in its section; a run new to a
+  // section takes the key of a run that just left another one with one of its agents, so the title slides along.
+  runKeys(runs) {
+    const last = this.runs ?? new Map();
+    const keys = new Map(), taken = new Set();
+    for (const { name } of runs) if (last.has(name)) { keys.set(name, last.get(name).key); taken.add(last.get(name).key); }
+    const left = [...last].filter(([name]) => !runs.some((r) => r.name === name)).map(([, r]) => r);
+    for (const { run, name } of runs) {
+      if (keys.has(name)) continue;
+      const from = left.find((r) => !taken.has(r.key) && run.some((a) => r.agents.includes(a.address)));
+      let key = from?.key ?? name;
+      if (from) this.movedAt[from.key] = Date.now();
+      for (let i = 2; taken.has(key) || (!from && left.some((r) => r.key === key)); i++) key = `${name}~${i}`;
+      keys.set(name, key);
+      taken.add(key);
+    }
+    this.runs = new Map(runs.map(({ run, name }) => [name, { key: keys.get(name), agents: run.map((a) => a.address) }]));
+    return keys;
   }
 
   rank(a) {
@@ -267,9 +315,10 @@ export default class Agents extends View {
     const rankOf = (a) => urgency.get(a.address);
     const sectionOf = (a) => rankOf(a) || RANK.idle;
     const placeOf = (a) => PLACE[sectionOf(a)] ?? 0;
-    list = [...list].sort((x, y) => placeOf(y) - placeOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
+    this.slot(list, sectionOf);
+    list = [...list].sort((x, y) => placeOf(y) - placeOf(x) || this.key(x) - this.key(y) || y.seq - x.seq);
     // Within a section an agent joins the others of its project (as Projects groups spaces: a repo's worktrees
-    // together), projects in the order of their most recent agent.
+    // together), projects in the order of their first agent.
     const projects = shared("projects.of") ?? {};
     const projectOf = (a) => projects[a.space] ?? { key: a.space, name: a.space_name, lead: a.space };
     const firstOf = new Map();
@@ -475,14 +524,24 @@ export default class Agents extends View {
     // same box moves when its agent changes section, and slides there.
     const items = [];
     const put = (key, make, est, left = 0) => items.push({ key, make, est, left });
-    const bySpace = (g, as) => {
+    // A section's agents in runs of one project each, every run named by its section and project.
+    const runsOf = (g, as) => {
       const runs = [];
       for (const a of as) { if (runs.at(-1) && projectOf(runs.at(-1)[0]).key === projectOf(a).key) runs.at(-1).push(a); else runs.push([a]); }
       const used = {};
-      runs.forEach((run, ri) => {
+      return runs.map((run) => {
         const pk = projectOf(run[0]).key, n = used[pk] = (used[pk] ?? 0) + 1;
-        const key = `${g.id}-${pk}${n > 1 ? `-${n}` : ""}`;
+        return { run, name: `${g.id}-${pk}${n > 1 ? `-${n}` : ""}` };
+      });
+    };
+    const shownOf = (g) => this.isFolded(g.id, false) ? [] : g.id === "sec-1" && !this.allIdle ? g.members.slice(0, IDLE_SHOWN) : g.members;
+    const runKey = this.runKeys(groups.flatMap((g) => runsOf(g, shownOf(g))));
+    const bySpace = (g, as) => {
+      runsOf(g, as).forEach(({ run, name }, ri) => {
+        const key = runKey.get(name);
         put(`title-${key}`, () => spaceTitle(g, run[0], ri === 0), ri === 0 ? 24 : 32);
+        // A title is always this tall, so one that moves to a section's first place or away from it slides there at once.
+        items.at(-1).fixed = true;
         const from = items.length;
         run.forEach((a, i) => {
           const subs = this.tree(all, a.address);
@@ -500,12 +559,13 @@ export default class Agents extends View {
       put(`${g.id}-more`, () => more(g, g.members.length - IDLE_SHOWN), 28);
     });
     let y = 0;
-    for (const it of items) if (!it.rail) { it.top = y; y += this.heights[it.key] ?? it.est; }
+    const heightOf = (it) => (it.fixed ? it.est : this.heights[it.key] ?? it.est);
+    for (const it of items) if (!it.rail) { it.top = y; y += heightOf(it); }
     // A rail runs from 2px above its first row to 4px above the end of its last.
     for (const it of items) if (it.rail) {
       const first = items[it.from], last = items[it.to];
       it.top = first.top - 2;
-      it.h = last.top + (this.heights[last.key] ?? last.est) - first.top - 2;
+      it.h = last.top + heightOf(last) - first.top - 2;
     }
     const height = y;
 
@@ -536,17 +596,21 @@ export default class Agents extends View {
       return div().id(`box-${it.key}`).absolute().left(it.left).right(0).top(it.top).bg(t.chrome)
         .opacity(shown ? 1 : 0).transition("top", move).transition("opacity", fade)
         .on_size_change((size, cx) => {
+          if (it.fixed) return;
           if (Math.abs((this.heights[it.key] ?? -1) - size.height) < 0.5) return;
           this.heights[it.key] = size.height;
           cx.notify();
         })
         .child(it.make());
     };
-    // Drawn bottom to top: what is fading out, rails, headings and titles, then agents, which pass over the rest.
-    const layer = (it) => (it.rail ? 0 : it.key.startsWith("ag-") || it.key.startsWith("sub-") ? 2 : 1);
+    // Drawn bottom to top: what is fading out, rails, headings and titles, then agents, which pass over the rest;
+    // an agent that changed section and the project title that went with it pass over everything while they slide.
+    for (const k of Object.keys(this.movedAt)) if (now - this.movedAt[k] > 2000) delete this.movedAt[k];
+    const moving = (it) => now - (this.movedAt[it.key.replace(/^(ag|title|rail)-/, "")] ?? -Infinity) < MOVE.duration + 200;
+    const layer = (it) => (it.rail ? 0 : it.key.startsWith("ag-") || it.key.startsWith("sub-") ? 2 : 1) + (moving(it) ? 3 : 0);
     const boxes = [
       ...[...this.ghosts.values()].map((it) => box(it, true)),
-      ...[0, 1, 2].flatMap((l) => items.filter((it) => layer(it) === l).map((it) => box(it, false))),
+      ...[0, 1, 2, 3, 4, 5].flatMap((l) => items.filter((it) => layer(it) === l).map((it) => box(it, false))),
     ];
 
     return v_flex()
