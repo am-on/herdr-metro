@@ -1,0 +1,187 @@
+{
+  "id": "root",
+  "cloned_from": {
+    "name": "main",
+    "version": "0.1.10"
+  },
+  "type": "row",
+  "preview": "layouts/metro.png",
+  "background": "canvas",
+  "terminal_opacity": 0,
+  "terminal_padding": [
+    8,
+    0
+  ],
+  "titlebar": "none",
+  "traffic_lights": [
+    16,
+    11
+  ],
+  "divider": {
+    "width": 1,
+    "color": "border"
+  },
+  "children": [
+    {
+      "id": "sidebar",
+      "type": "column",
+      "children": [
+        {
+          "id": "brand",
+          "type": "block",
+          "content": {
+            "mod": "metro-chrome"
+          },
+          "size": {
+            "px": 36
+          },
+          "window_drag": true,
+          "children": []
+        },
+        {
+          "id": "lists",
+          "type": "column",
+          "divider": {
+            "width": 1,
+            "color": "border"
+          },
+          "children": [
+            {
+              "id": "agents",
+              "type": "block",
+              "size": {
+                "weight": 1
+              },
+              "min": 90,
+              "content": {
+                "mod": "metro-agents"
+              },
+              "children": []
+            },
+            {
+              "id": "spaces",
+              "type": "block",
+              "size": {
+                "weight": 1
+              },
+              "min": 90,
+              "content": {
+                "mod": "metro-spaces"
+              },
+              "children": []
+            }
+          ]
+        }
+      ],
+      "size": {
+        "px": 268
+      },
+      "min": 180,
+      "max": 480,
+      "background": "chrome",
+      "resizable": false
+    },
+    {
+      "id": "work",
+      "type": "column",
+      "children": [
+        {
+          "id": "tabs",
+          "type": "block",
+          "size": {
+            "px": 36
+          },
+          "window_drag": true,
+          "content": {
+            "mod": "metro-tabs"
+          },
+          "children": []
+        },
+        {
+          "id": "work-body",
+          "type": "row",
+          "children": [
+            {
+              "id": "view",
+              "type": "stack",
+              "active": "main",
+              "children": [
+                {
+                  "id": "main",
+                  "type": "block",
+                  "content": {
+                    "tab": "active",
+                    "pane": {
+                      "header": {
+                        "content": {
+                          "mod": "metro-pane"
+                        },
+                        "reveal": "always",
+                        "height": 28,
+                        "position": "top"
+                      },
+                      "background": "background",
+                      "border": {
+                        "width": 2,
+                        "color": "background"
+                      },
+                      "focus": {
+                        "width": 2,
+                        "color": "background"
+                      },
+                      "radius": 0,
+                      "gap": 8,
+                      "lone": true
+                    }
+                  },
+                  "children": []
+                },
+                {
+                  "id": "agent",
+                  "type": "block",
+                  "content": {
+                    "agent": "focused"
+                  },
+                  "background": "background",
+                  "radius": 0,
+                  "children": []
+                }
+              ]
+            }
+          ],
+          "resizable": false
+        },
+        {
+          "id": "status",
+          "type": "row",
+          "size": {
+            "px": 36
+          },
+          "resizable": false,
+          "children": [
+            {
+              "id": "status-usage",
+              "type": "block",
+              "content": {
+                "mod": "metro-usage"
+              },
+              "children": []
+            },
+            {
+              "id": "status-clocks",
+              "type": "block",
+              "size": {
+                "px": 440
+              },
+              "content": {
+                "mod": "metro-clocks"
+              },
+              "children": []
+            }
+          ]
+        }
+      ],
+      "resizable": false
+    }
+  ]
+}

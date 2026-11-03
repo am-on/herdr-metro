@@ -1,0 +1,18 @@
+# Only this setup's own files; everything Herdr ships or writes stays out.
+/*
+!/.gitignore
+!/README.md
+!/RECIPE.md
+!/LICENSE
+!/preview.png
+!/docs/
+!/scripts/
+!/layouts/
+/layouts/*
+!/layouts/metro.json
+!/layouts/metro.png
+!/mods/
+/mods/*
+!/mods/metro-*/
+/mods/*/jsconfig.json
+/mods/*/*.d.ts
