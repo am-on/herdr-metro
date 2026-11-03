@@ -29,10 +29,8 @@ const headingMark = (t, kind) => {
 // How long a box takes to slide to its new place, and to fade in or out.
 const MOVE = { duration: 260, easing: "ease-in-out" };
 const FADE = 180;
-// How long a finished agent you've looked at waits, once you've left it and the list, before dropping to Idle.
+// How long a finished agent you've looked at waits, once you've left it, before dropping to Idle.
 const LINGER = 1000;
-// How long a still pointer over the list keeps holding it.
-const POINTER = 3000;
 const RANK = { blocked: 4, done: 3, check: 2.5, working: 2, idle: 1 };
 // "Check again": an agent the person marked to come back to, a label on its terminal until the agent works again (metro-tabs clears it).
 const CHECK = "metro.check";
@@ -106,7 +104,7 @@ export default class Agents extends View {
     this.ghosts = new Map();
     this.born = {};
     this.started = Date.now();
-    // Finished agents still shown in Done: held while done, focused or under a pointer on the list, then when let go; see hold().
+    // Finished agents still shown in Done: held while done or focused, then when let go; see hold().
     this.doneAt = {};
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
@@ -164,16 +162,13 @@ export default class Agents extends View {
     return this.changed[a.address]?.at ?? 0;
   }
 
-  // Looking at a done agent makes it idle; it stays with Done while it's focused or the pointer is over the list,
-  // and drops to Idle a second after both end, so it never moves under the pointer. Any other change moves it at once.
+  // Looking at a done agent makes it idle; it stays with Done while it's focused and drops to Idle a second after
+  // you leave it. Any other change moves it at once.
   hold(list, now) {
     const lingering = [];
-    // The pointer counts while it moved over the list lately: a pointer leaving the window may never say it left.
-    const pointer = this.overList && now - (this.movedAt ?? 0) < POINTER;
-    if (pointer) lingering.push(POINTER - (now - this.movedAt));
     for (const a of list) {
       const d = this.doneAt[a.address];
-      if (a.status === "done" || (d && a.status === "idle" && (a.focused || pointer))) this.doneAt[a.address] = { held: true };
+      if (a.status === "done" || (d && a.status === "idle" && a.focused)) this.doneAt[a.address] = { held: true };
       else if (a.status !== "idle" || !d) delete this.doneAt[a.address];
       // The wait starts on the render that sees it let go.
       else if (d.held) { this.doneAt[a.address] = { at: now }; lingering.push(LINGER); }
@@ -568,8 +563,6 @@ export default class Agents extends View {
       // The list scrolls under an always-visible 10px bar on its right edge.
       .child(div().relative().flex_1().min_h(0)
         .child(v_flex().id("ag-list").size_full().px(8).overflow_y_scroll()
-          .on_hover((over, cx) => { this.overList = over; this.movedAt = Date.now(); cx.notify(); })
-          .on_mouse_move(() => { this.movedAt = Date.now(); })
           .child(div().relative().w_full().h(height).flex_none().children(boxes)))
         .child(div().absolute().top(0).bottom(0).right(0).w(10).child(Scrollbar.vertical("ag-list").size_full().mode("always"))));
   }
