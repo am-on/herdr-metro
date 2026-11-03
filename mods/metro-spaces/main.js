@@ -360,7 +360,7 @@ export default class Spaces extends View {
     if (Object.keys(painted).length) setShared("space.colors", { ...colors, ...painted });
     if (changed) setShared("projects.kept", kept);
     if (JSON.stringify(of) !== JSON.stringify(shared("projects.of") ?? {})) setShared("projects.of", of);
-    // Kept projects with nothing open stay, dimmed, after the open ones.
+    // Kept projects with nothing open stay after the open ones, in the same colors.
     for (const k of kept) if (!placed.has(k.key)) out.push({ kind: "project", w: { id: null, machine: k.machine }, g: { repo: k.key, name: k.name, initial: k.initial, folder: k.folder ? k.path : null }, closed: k, count: 0 });
     // Open projects, then closed ones, each in the order the person dragged them into; ones not placed yet follow, as they come.
     const groups = [];
@@ -547,12 +547,12 @@ export default class Spaces extends View {
       .when(!closed, el => el.on_mouse_down("right", () => this.menu(w)))
       // The avatar picks an open project's color.
       .child(h_flex().id(`${id}-color`).size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(11).font_bold()
-        .text_color(fill?.startsWith("#") ? ink(fill) : "#ffffff").when(Boolean(closed), el => el.opacity(0.55))
+        .text_color(fill?.startsWith("#") ? ink(fill) : "#ffffff")
         .when(!closed, el => el.cursor_pointer().role("button").accessibility_label(`Change ${name}'s color`).tooltip("Change color")
           .on_mouse_down("left", stop)
           .on_click((_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "metro-space-color", kind: "popup", width: 304, height: 84, props: { space: w.id } }); }))
         .child([...(g.initial ?? g.name)][0]?.toUpperCase() ?? "?"))
-      .when(!editing, el => el.child(div().id(`${id}-title`).tooltip("Double-click to rename").flex_1().min_w(0).truncate().text_size(13).font_weight(700).text_color(closed ? t.muted : t.foreground).child(name)))
+      .when(!editing, el => el.child(div().id(`${id}-title`).tooltip("Double-click to rename").flex_1().min_w(0).truncate().text_size(13).font_weight(700).text_color(t.foreground).child(name)))
       .when(editing, el => el.child(div().id(`${id}-name`).flex_1().min_w(0).h(26).px(6).flex().items_center().rounded(5)
         .bg(t.background).border(1).border_color(t.accent).text_size(13)
         .on_mouse_down("left", stop).on_click((_e, cx) => cx.stop_propagation())
@@ -587,7 +587,7 @@ export default class Spaces extends View {
       // The mark sits close to the name it belongs to: 6px between them.
       .child(h_flex().w_full().min_w(0).gap(6).items_center()
         .child(h_flex().size(14).flex_none().items_center().justify_center().when(Boolean(dot), el => el.child(dot)))
-        .child(div().min_w(0).truncate().text_size(12.5).text_color(dim ? t.muted : t.foreground).child(name)))
+        .child(div().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(name)))
       .when(Boolean(branch), el => el.child(h_flex().w_full().min_w(0).pl(20).gap(6).items_center().text_size(12).text_color(t.dim).child(branch)));
   }
 
