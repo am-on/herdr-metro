@@ -445,7 +445,9 @@ export default class Worktree extends View {
               .child(Scrollbar.vertical("wt-list").absolute().inset_0()),
           ),
       )
-      .child(h_flex().justify_end().text_size(11).text_color(t.dim).child("\u2191\u2193 choose \u00b7 \u21b5 open \u00b7 esc close"));
+      .child(h_flex().gap(12).items_center()
+        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).child("↑↓ choose"))
+        .child(this.buttons(t, r === null, "Open worktree", Boolean(rows[this.at]), () => this.open(rows[this.at]))));
   }
 
   // The picker's list rows: a heading before each kind, then its items.
@@ -510,7 +512,8 @@ export default class Worktree extends View {
     };
     const prs = items.filter((i) => i.kind === "pr").length;
     const count = r && this.branches ? `${this.prs === undefined ? "" : `${prs} pull request${prs === 1 ? "" : "s"} · `}${items.filter((i) => i.kind === "branch").length} branches` : "";
-    const status = this.fetching ? "fetching origin…" : this.fetchError ? "couldn't fetch origin: its branches are as of the last fetch" : "";
+    const status = this.fetching ? "fetching origin…" : this.fetchError ? "couldn't fetch origin: its branches are as of the last fetch" : "↑↓ choose";
+    const chosen = items[this.at];
     return v_flex()
       .id("worktree")
       .track_focus(this.handle)
@@ -543,9 +546,10 @@ export default class Worktree extends View {
           ),
       )
       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
-      .child(h_flex().gap(12).text_size(11).text_color(t.dim)
-        .child(div().flex_1().min_w(0).truncate().text_color(this.fetchError ? t.working : t.dim).child(status))
-        .child(div().flex_none().child(this.busy ? "working…" : "↑↓ choose · ↵ check out · esc close")));
+      .child(h_flex().gap(12).items_center()
+        .child(div().flex_1().min_w(0).text_size(11).text_color(this.fetchError ? t.working : t.dim).child(status))
+        .child(this.buttons(t, r === null, this.busy ? "Creating…" : chosen && open(chosen.branch) ? "Open worktree" : "Create worktree",
+          Boolean(r && chosen && !this.busy), (cx) => this.choose(chosen, cx))));
   }
 
   render(cx) {
@@ -589,13 +593,7 @@ export default class Worktree extends View {
       )
       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
       .child(div().flex_1())
-      .child(
-        h_flex()
-          .justify_end()
-          .text_size(11)
-          .text_color(t.dim)
-          .child(this.busy ? "working…" : blocked ? "esc close" : "↵ create · esc cancel"),
-      );
+      .child(this.buttons(t, r === null, this.busy ? "Creating…" : "Create worktree", !blocked && !this.busy, (cx) => this.go(cx)));
   }
 
   // Removing a worktree: a trash icon on red and "Remove <name>?" as the heading, what goes and what stays, each risk
@@ -643,24 +641,26 @@ export default class Worktree extends View {
           .child(div().flex_1().min_w(0).truncate().text_size(17).text_color(t.foreground).child(`Remove ${name}?`)))
         .children(body)
         .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
-        .child(div().mt(6).child(this.removeButtons(t, blocked))));
+        .child(div().mt(6).child(this.buttons(t, blocked, this.busy ? "Removing…" : "Remove worktree", Boolean(!blocked && r && !this.busy), (cx) => this.go(cx), t.blocked, "#ffffff"))));
   }
 
-  // Removing asks with buttons as well as keys: Cancel (Esc), and a red Remove worktree (Enter) once it can be removed.
-  removeButtons(t, blocked) {
-    // Each button names its key in a small label after its words.
-    const button = (id, label, key, danger, action) => h_flex().id(id).h(34).pl(16).pr(8).gap(10).flex_none().items_center().rounded(7).border(1).text_size(14)
-      .border_color(danger ? t.blocked : t.input).bg(danger ? t.blocked : t.background).text_color(danger ? "#ffffff" : t.foreground)
-      .hover((st) => (danger ? st.opacity(0.85) : st.bg(t.hover)))
+  // Every dialog asks with buttons as well as keys: Cancel (Esc), and its action (Enter), dimmed until it can act.
+  // Where it never can, the one button left is Close.
+  buttons(t, blocked, label, ready, action, fill = t.solid, ink = t.solid_foreground) {
+    return h_flex().flex_none().gap(8).items_center().justify_end()
+      .child(this.keyButton(t, "cancel", blocked ? "Close" : "Cancel", "esc", () => this.close()))
+      .when(!blocked, (el) => el.child(this.keyButton(t, "confirm", label, "↵", action, fill, ink).when(!ready, (b) => b.opacity(0.6))));
+  }
+
+  // A button names its key in a small label after its words.
+  keyButton(t, id, label, key, action, fill = null, ink = null) {
+    return h_flex().id(id).h(34).pl(16).pr(8).gap(10).flex_none().items_center().rounded(7).border(1).text_size(14)
+      .border_color(fill ?? t.input).bg(fill ?? t.background).text_color(ink ?? t.foreground)
+      .hover((st) => (fill ? st.opacity(0.85) : st.bg(t.hover)))
       .role("button").accessibility_label(`${label} (${key === "↵" ? "Enter" : "Esc"})`)
       .on_click((_e, cx) => action(cx))
       .child(label)
       .child(div().h(20).px(6).flex().items_center().rounded(4).text_size(11.5)
-        .bg(danger ? "#ffffff2e" : t.surface).border(1).border_color(danger ? "#ffffff40" : t.border).text_color(danger ? "#ffffff" : t.muted).child(key));
-    const ready = !blocked && this.repo && !this.busy;
-    return h_flex().gap(8).items_center().justify_end()
-      .child(button("cancel", blocked ? "Close" : "Cancel", "esc", false, () => this.close()))
-      .when(!blocked, (el) => el.child(button("remove", this.busy ? "Removing…" : "Remove worktree", "↵", true, (cx) => this.go(cx))
-        .when(!ready, (b) => b.opacity(0.6))));
+        .bg(fill ? "#ffffff2e" : t.surface).border(1).border_color(fill ? "#ffffff40" : t.border).text_color(ink ?? t.muted).child(key));
   }
 }
