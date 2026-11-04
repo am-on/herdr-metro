@@ -475,10 +475,8 @@ export default class Agents extends View {
       else groups.push({ id, label: SECTION[r], status: SECTION_STATUS[r], members: [a] });
     }
 
-    // A section's header, its still state mark and its name in bold, in its status color; it folds the section. Later ones keep 8px above.
+    // A section's header, its still state mark and its name in bold, in its status color. Later ones keep 8px above.
     const header = (g, i) => {
-      const initial = false;
-      const open = !this.isFolded(g.id, initial);
       return h_flex()
         .id(g.id)
         .px(8)
@@ -488,15 +486,12 @@ export default class Agents extends View {
         .gap(6)
         .items_center()
         .text_size(11)
-        .on_click((_e, cx) => this.toggleFold(g.id, cx, initial))
         // Working is green, as its spinner; Idle's theme color is a faint grey meant for marks, so its header is a dark grey.
         .child(headingMark(t, g.status))
         .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_size(13).text_color({ check: t.accent, working: t.ansi2, idle: t.foreground + "bb" }[g.status] ?? t[g.status] ?? t.dim).child(g.label))
-        // A count only where the rows don't show it at a glance: past five, or folded. Ringed, as Spaces' hidden worktrees.
-        .when(g.members.length > 5 || !open, (el) => el.child(div().size(22).flex_none().rounded_full().border(1).border_color(t.border)
-          .flex().items_center().justify_center().text_size(11).text_color(t.muted).child(String(g.members.length))))
-        .child(div().flex_1())
-        .when(!open, (el) => el.child(svg("mods/metro-chrome/icons/chevron-right.svg").size(12).flex_none().text_color(t.dim)));
+        // A count only where the rows don't show it at a glance: past five. Ringed, as Spaces' hidden worktrees.
+        .when(g.members.length > 5, (el) => el.child(div().size(22).flex_none().rounded_full().border(1).border_color(t.border)
+          .flex().items_center().justify_center().text_size(11).text_color(t.muted).child(String(g.members.length))));
     };
     // Idle shows its first five; a row under them shows the rest.
     const IDLE_SHOWN = 5;
@@ -534,7 +529,7 @@ export default class Agents extends View {
         return { run, name: `${g.id}-${pk}${n > 1 ? `-${n}` : ""}` };
       });
     };
-    const shownOf = (g) => this.isFolded(g.id, false) ? [] : g.id === "sec-1" && !this.allIdle ? g.members.slice(0, IDLE_SHOWN) : g.members;
+    const shownOf = (g) => g.id === "sec-1" && !this.allIdle ? g.members.slice(0, IDLE_SHOWN) : g.members;
     const runKey = this.runKeys(groups.flatMap((g) => runsOf(g, shownOf(g))));
     const bySpace = (g, as) => {
       runsOf(g, as).forEach(({ run, name }, ri) => {
@@ -553,7 +548,6 @@ export default class Agents extends View {
     };
     groups.forEach((g, i) => {
       put(`head-${g.id}`, () => header(g, i), i > 0 ? 32 : 24);
-      if (this.isFolded(g.id, false)) return;
       if (g.id !== "sec-1" || g.members.length <= IDLE_SHOWN) return bySpace(g, g.members);
       bySpace(g, this.allIdle ? g.members : g.members.slice(0, IDLE_SHOWN));
       put(`${g.id}-more`, () => more(g, g.members.length - IDLE_SHOWN), 28);
