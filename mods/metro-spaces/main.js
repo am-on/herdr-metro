@@ -594,7 +594,7 @@ export default class Spaces extends View {
   // A checkout no space shows: no dot; a click opens a space there, the hover × removes a worktree (asks first).
   checkoutRow({ w, c, primary }, t) {
     const on = w.machine ?? null;
-    const branch = c.branch ?? "detached";
+    const branch = div().flex_1().min_w(0).truncate().child(c.branch ?? "detached");
     const id = `checkout-${c.path}`;
     return this.lift(this.card(id, t, {
       dot: null, name: primary ? "Main" : base(c.path), branch, dim: true, nested: true,
