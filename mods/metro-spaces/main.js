@@ -629,7 +629,7 @@ export default class Spaces extends View {
     const dot = marked ? svg("mods/metro-chrome/icons/bookmark-filled.svg").size(12).text_color(t.accent)
       : w.status === "working" ? breathing(t.ansi2)
       : w.status === "blocked" ? div().size(14).rounded(4).bg(t.blocked + "26").text_size(11).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!")
-      : w.status === "done" ? div().size(7).rounded_full().bg(t.done)
+      : w.status === "done" || agents().some((a) => a.space === w.id && (shared("agents.finished") ?? []).includes(a.address)) ? div().size(7).rounded_full().bg(t.done)
       : w.status ? div().size(7).rounded_full().border(1.5).border_color(t.dim)
       : null;
     const branch = g ? h_flex().flex_1().min_w(0).gap(8).items_center()

@@ -1,5 +1,5 @@
 // Agents in priority sections, each grouped by space; parents take their most urgent sub-agent's place.
-// A viewed done agent stays in Done until left.
+// A finished agent stays in Done until left, seen or not.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Button, Scrollbar } from "gpui-base";
@@ -190,13 +190,15 @@ export default class Agents extends View {
     return this.slots[a.address]?.k ?? 0;
   }
 
-  // Looking at a done agent makes it idle; it stays with Done while it's focused or the pointer is on a row of the
-  // list (one just clicked), and drops to Idle a second after both end. Any other change moves it at once.
-  hold(list, now) {
+  // An agent that finishes on screen goes from working straight to idle, and looking at a done agent makes it idle.
+  // Either way it stays with Done while it's focused or the pointer is on a row of the list (one just clicked), and
+  // drops to Idle a second after both end. Any other change moves it at once.
+  hold(list, was, now) {
     const lingering = [];
     for (const a of list) {
       const d = this.doneAt[a.address];
-      if (a.status === "done" || (d && a.status === "idle" && (a.focused || this.hovered))) this.doneAt[a.address] = { held: true };
+      const finished = a.status === "done" || (a.status === "idle" && was?.get(a.address) === "working");
+      if (finished || (d && a.status === "idle" && (a.focused || this.hovered))) this.doneAt[a.address] = { held: true };
       else if (a.status !== "idle" || !d) delete this.doneAt[a.address];
       // The wait starts on the render that sees it let go.
       else if (d.held) { this.doneAt[a.address] = { at: now }; lingering.push(LINGER); }
@@ -226,9 +228,14 @@ export default class Agents extends View {
     return keys;
   }
 
+  // Its state as shown: an agent held in Done counts as done.
+  shownStatus(a) {
+    return a.status === "idle" && this.doneAt[a.address] != null ? "done" : a.status;
+  }
+
   rank(a) {
     if (this.checked?.has(a.address) && a.status !== "working" && a.status !== "blocked") return RANK.check;
-    return a.status === "idle" && this.doneAt[a.address] != null ? RANK.done : RANK[a.status] ?? 0;
+    return RANK[this.shownStatus(a)] ?? 0;
   }
 
   peek(addr) {
@@ -298,6 +305,7 @@ export default class Agents extends View {
   render(cx) {
     const t = theme();
     let list = agents();
+    const was = this.listed;
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     this.checked = new Set(terminals().filter((k) => k.labels?.[CHECK]).map((k) => k.address));
     const all = terminals();
@@ -305,7 +313,10 @@ export default class Agents extends View {
     const now = Date.now();
     this.track(list, now);
     // A finished agent waiting to drop to Idle gets a render when its wait ends.
-    const wait = this.hold(list, now);
+    const wait = this.hold(list, was, now);
+    // The tabs, pane headers and Projects show the agents held in Done as done too.
+    const held = list.filter((a) => a.status === "idle" && this.doneAt[a.address] != null).map((a) => a.address);
+    if (JSON.stringify(held) !== JSON.stringify(shared("agents.finished") ?? [])) setShared("agents.finished", held);
     if (wait != null && !(this.lingerTick && this.lingerAt <= now + wait)) {
       this.lingerTick?.cancel();
       this.lingerAt = now + wait;
@@ -368,7 +379,7 @@ export default class Agents extends View {
       const more = detail.get(a.address);
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
-      const idle = a.status === "idle" && !a.focused;
+      const idle = this.shownStatus(a) === "idle" && !a.focused;
       const isPinned = this.pins.includes(a.address);
       // Shown on hover in the status slot: the far edge, nothing moves, no empty gap.
       const pin = Button.new(`pin-${a.address}`)
@@ -408,7 +419,7 @@ export default class Agents extends View {
       // Folded, the status shows a hidden child when it's more urgent than the agent itself.
       const folded = subs.length > 0 && this.isFolded(a.address);
       const kid = folded ? subs.map((s) => kidStatus(s.t, this.listed)).reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m)) : null;
-      const fromKid = (RANK[kid] ?? 0) > (RANK[a.status] ?? 0);
+      const fromKid = (RANK[kid] ?? 0) > (RANK[this.shownStatus(a)] ?? 0);
       const canMark = a.status !== "working" && a.status !== "blocked";
       const marked = canMark && this.checked.has(a.address);
       // Two lines, as Spaces draws a worktree: the mark, icon and name, then the branch it's on.
@@ -450,7 +461,7 @@ export default class Agents extends View {
             cx.stop_propagation();
             this.toggleFold(a.address, cx);
           })).when(Boolean(toggle), el => el.child(toggle))
-          .children([this.status(t, fromKid ? { status: kid } : { status: marked ? "check" : a.status },
+          .children([this.status(t, fromKid ? { status: kid } : { status: marked ? "check" : this.shownStatus(a) },
             a.focused || this.hovered === a.address ? t.background : t.chrome, fromKid ? " (sub-agent)" : "")
             ?.id(`status-${a.address}`)
             .when(canMark, (el) => el.cursor_pointer().on_click((_e, cx) => { cx.stop_propagation(); setCheck(a.address, !marked); }))].filter(Boolean)))

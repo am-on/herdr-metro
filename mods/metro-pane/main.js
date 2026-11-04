@@ -120,7 +120,8 @@ export default class Pane extends View {
     // A mod pane (a review, a viewer) is called by its tab's name; a terminal by what it runs.
     const name = p.terminal ? namer()(p) : spaces().flatMap((x) => x.tabs).find((c) => c.id === p.tab)?.name || p.title;
     const pic = icon(p.program ?? MOD_PROGRAMS[p.mod], 14, t.muted);
-    const st = p.status;
+    // An agent the agents list holds in Done shows as done.
+    const st = p.status === "idle" && (shared("agents.finished") ?? []).includes(p.terminal) ? "done" : p.status;
     const pane = p.pane;
     const toolbar = p.mod === "metro-review" ? this.review(t, p) : null;
     const canMark = p.terminal && st != null && st !== "working" && st !== "blocked";

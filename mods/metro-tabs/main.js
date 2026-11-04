@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, focused, run, hc, openOverlay, theme, window, layout, settings, nextCommand } from "herdr";
+import { spaces, panes, agents, terminals, focused, run, hc, openOverlay, theme, window, layout, settings, nextCommand, shared } from "herdr";
 import { namer } from "./name.js";
 import { lookup, staleness, prColor, issueColor, open } from "./github.js";
 
@@ -12,6 +12,8 @@ const MOD_PROGRAMS = { "metro-review": { name: "Review", icon: "mods/metro-chrom
 const CHECK = "metro.check";
 const checkedSet = () => new Set(terminals().filter(k => k.labels?.[CHECK]).map(k => k.address));
 const setCheck = (address, on) => hc(["label", address, `${CHECK}=${on ? "1" : ""}`]);
+// An agent's state as shown: one the agents list holds in Done counts as done.
+const shownStatus = (a) => a.status === "idle" && (shared("agents.finished") ?? []).includes(a.address) ? "done" : a.status;
 const checkMark = (t) => svg("mods/metro-chrome/icons/bookmark-filled.svg").size(12).flex_none().text_color(t.accent);
 
 const blockedMark = (t) => div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(11).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
@@ -152,7 +154,7 @@ export default class Tabs extends View {
   // Idle agents aren't counted: nothing to look at.
   sidebarToggle(t, stop) {
     const list = agents();
-    const counts = ["blocked", "working", "done"].map(s => [s, list.filter(a => a.status === s).length]).filter(([, n]) => n > 0);
+    const counts = ["blocked", "working", "done"].map(s => [s, list.filter(a => shownStatus(a) === s).length]).filter(([, n]) => n > 0);
     const words = { blocked: "need you", working: "working", done: "done" };
     const summary = counts.map(([s, n]) => `${n} ${words[s]}`).join(" · ");
     return h_flex().id("sidebar-toggle").h(26).px(6).gap(8).flex_none().items_center().rounded(6)
@@ -169,12 +171,13 @@ export default class Tabs extends View {
     const a = agents().find(x => x.address === shown);
     if (!a) return div().id("agent-bar").flex_1().px(8).text_size(13).text_color(t.dim).child("No agent");
     const p = a.program;
-    const news = a.status !== "done" || live.some(x => x.address === a.address);
+    const st = shownStatus(a);
+    const news = st !== "done" || live.some(x => x.address === a.address);
     return h_flex().id("agent-bar").flex_1().min_w(0).h(28).px(8).gap(8).items_center().text_size(13)
       .when(Boolean(p?.icon), el => el.child(p.tint ? svg(p.icon).size(14).text_color(t.muted) : image(p.icon).size(14)))
       .child(div().flex_none().max_w(320).truncate().text_color(t.foreground).child(title(a)))
       .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(a.space_name ?? ""))
-      .when(["working", "blocked", "done"].includes(a.status) && news, el => el.child(mark(t, a.status)));
+      .when(["working", "blocked", "done"].includes(st) && news, el => el.child(mark(t, st)));
   }
 
   // In the pull requests view the bar names it; the brand bar's button and the one here lead back.
@@ -234,7 +237,7 @@ export default class Tabs extends View {
       const name = c.named ? c.name : lead ? title(lead) : "Terminal";
       const lit = this.hovered === c.id;
       // Any tab with an agent shows its state, an idle one a grey ring.
-      const doneLive = c.status === "done" && live.some(a => a.tab === c.id && a.status === "done");
+      const doneLive = live.some(a => a.tab === c.id && shownStatus(a) === "done");
       const idle = mine.some(p => p.status != null) && c.status !== "working" && c.status !== "blocked" && !flagged.length && !doneLive;
       const kind = c.status === "working" || c.status === "blocked" ? c.status : flagged.length ? "check" : doneLive ? "done" : idle ? "idle" : null;
       // Equal-width flat tabs split by hairlines; the active one takes the pane's paper and a dark underline.
