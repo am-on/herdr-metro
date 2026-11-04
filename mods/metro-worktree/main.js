@@ -3,7 +3,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home, settings } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, agents, exec, home, settings } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
@@ -335,16 +335,26 @@ export default class Worktree extends View {
     this.dirty ||= status.out !== "";
     this.unpushed = [...new Set([...this.unpushed, ...unpushed])];
     if (changed) return "It changed since this opened. Remove worktree again removes it anyway.";
-    // Terminals first: a shell sitting in the folder keeps it busy on Windows.
-    // Only spaces inside the checkout close, each by id: an id-less close closes the focused space.
-    const inside = (p, dir) => p === dir || p.startsWith(dir + "/");
-    for (const x of spaces()) {
-      const at = place(x)?.replace(/\\/g, "/");
-      if ((x.machine ?? null) === (this.on ?? null) && at && inside(at, this.repo.top)) run("space.close", { id: x.id, confirmed: true });
+    // git refuses a locked worktree, so it's found before anything closes.
+    const list = await git(this.repo.main, ["worktree", "list", "--porcelain"], this.on);
+    if (list.out.split("\n\n").some((entry) => entry.startsWith(`worktree ${this.repo.top}\n`) && /^locked/m.test(entry))) {
+      return "This worktree is locked, so nothing was closed. Run git worktree unlock on it, then try again.";
     }
+    // Terminals first: a shell sitting in the folder keeps it busy on Windows.
+    // Each closes by id: an id-less close closes the focused space.
+    for (const x of this.spacesIn(this.repo.top)) run("space.close", { id: x.id, confirmed: true });
     const force = this.dirty || mods.length > 0;
     const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on);
-    return r.ok ? "" : r.err || "git worktree remove failed.";
+    return r.ok ? "" : `Its space closed, but the folder wasn't removed. Git says: ${r.err.replace(/^(error|fatal): /, "") || "git worktree remove failed."}`;
+  }
+
+  // The spaces whose terminals are inside a checkout: removing it closes them.
+  spacesIn(top) {
+    const inside = (p) => p === top || p.startsWith(top + "/");
+    return spaces().filter((x) => {
+      const at = place(x)?.replace(/\\/g, "/");
+      return (x.machine ?? null) === (this.on ?? null) && at && inside(at);
+    });
   }
 
   key(e, cx) {
@@ -606,6 +616,8 @@ export default class Worktree extends View {
       .child(svg(`mods/metro-chrome/icons/${icon}.svg`).size(15).flex_none().mt(1).text_color(color).when(spin, (el) => el.spin(900)))
       .child(div().flex_1().min_w(0).child(text));
     const folder = r?.top ?? props()?.folder ?? this.folder ?? "";
+    const closing = new Set(this.spacesIn(folder).map((x) => x.id));
+    const open = agents().filter((a) => closing.has(a.space)).length;
     const body = r === null ? [div().text_color(t.muted).child(`${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is not in a git repository.`)]
       : r && !r.linked ? [div().text_color(t.muted).child("This is the repository's main checkout, not a worktree, so it can't be removed.")]
       : [
@@ -615,18 +627,23 @@ export default class Worktree extends View {
         r === undefined ? quiet("checking", "spinner", t.dim, "Checking for uncommitted changes…", true)
           : this.dirty ? risk("risk-dirty", "It has uncommitted changes: they will be lost.")
           : quiet("clean", "check", t.ansi2, "No uncommitted changes."),
+        ...(open ? [risk("risk-agents", open === 1 ? "It has an open agent: it will be closed." : `It has ${open} open agents: they will be closed.`)] : []),
         ...(this.unpushed.length ? [risk("risk-submodules", `Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)] : []),
       ];
-    return v_flex().id("worktree").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
-      .size_full().px(24).pt(22).pb(20).gap(14).bg(t.popover).text_size(14)
-      .child(h_flex().gap(12).items_center()
-        .child(div().size(34).flex_none().rounded_full().bg(t.blocked + "1f").flex().items_center().justify_center()
-          .child(svg("mods/metro-chrome/icons/trash.svg").size(17).text_color(t.blocked)))
-        .child(div().flex_1().min_w(0).truncate().text_size(17).text_color(t.foreground).child(`Remove ${name}?`)))
-      .children(body)
-      .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
-      .child(div().flex_1())
-      .child(this.removeButtons(t, blocked));
+    // A dialog keeps the size it opened at, so this one opens frameless and tall and draws its own card, as tall as what it says.
+    return h_flex().id("worktree").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+      .size_full().items_center().justify_center()
+      .on_mouse_down("left", () => this.close())
+      .child(v_flex().id("worktree-card").w(480).px(24).pt(22).pb(20).gap(14).rounded(10)
+        .bg(t.popover).border(1).border_color(t.border).shadow_lg().text_size(14)
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .child(h_flex().flex_none().gap(12).items_center()
+          .child(div().size(34).flex_none().rounded_full().bg(t.blocked + "1f").flex().items_center().justify_center()
+            .child(svg("mods/metro-chrome/icons/trash.svg").size(17).text_color(t.blocked)))
+          .child(div().flex_1().min_w(0).truncate().text_size(17).text_color(t.foreground).child(`Remove ${name}?`)))
+        .children(body)
+        .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
+        .child(div().mt(6).child(this.removeButtons(t, blocked))));
   }
 
   // Removing asks with buttons as well as keys: Cancel (Esc), and a red Remove worktree (Enter) once it can be removed.

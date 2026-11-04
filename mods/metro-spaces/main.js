@@ -601,7 +601,12 @@ export default class Spaces extends View {
     }), id, t).role("button").accessibility_label(`Open ${base(c.path)}`)
       .on_click(() => run("space.new", { folder: c.path, ...(on ? { machine: on } : {}) }))
       .when(this.hovered === id && !c.main, el => el.child(this.cornerClose(`${id}-remove`, "Remove worktree (asks first)", t,
-        () => openOverlay({ mod: "metro-worktree", kind: "dialog", width: 480, height: 300, props: { folder: c.path, machine: on, action: "remove" } }))));
+        () => this.askRemove({ folder: c.path, machine: on }))));
+  }
+
+  // The dialog that removes a worktree: it draws its own card, as tall as what it says, in this frameless area.
+  askRemove({ folder, machine, space }) {
+    openOverlay({ mod: "metro-worktree", kind: "dialog", frame: "none", width: 520, height: 0.9, props: { folder, machine, space, action: "remove" } });
   }
 
   // The × in a hovered card's top-right corner; pressing it never starts a drag or selects the card.
@@ -663,9 +668,10 @@ export default class Spaces extends View {
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
-      // × closes the space; Herdr asks first when it would end running agents.
-      .when(this.hovered === `space-${w.id}`, el => el.child(this.cornerClose(`space-${w.id}-close`, "Close space", t,
-        () => run("space.close", { id: w.id }))));
+      // × removes a worktree, its space included, in one dialog; any other space closes, and Herdr asks first when it would end running agents.
+      .when(this.hovered === `space-${w.id}`, el => el.child(g?.linked
+        ? this.cornerClose(`space-${w.id}-remove`, "Remove worktree (asks first)", t, () => this.askRemove({ folder: g.top, machine: w.machine ?? null, space: w.id }))
+        : this.cornerClose(`space-${w.id}-close`, "Close space", t, () => run("space.close", { id: w.id }))));
   }
 
   render() {
