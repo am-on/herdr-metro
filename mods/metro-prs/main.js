@@ -71,6 +71,7 @@ export default class Prs extends View {
     this.errors = {}; // url -> why its checkout didn't open
     this.setup = {}; // "owner/repo" not here yet -> { busy: "pick" | "clone" | null, error, found, path }, while its card shows
     this.showHidden = {}; // section id -> its hidden ones are unfolded
+    this.copied = null; // the URL of the pull request whose branch name was just copied
     this.handle = cx.focus_handle();
     this.listWidth = savedWidth();
     this.drag = null; // { x, width } while the list's edge is dragged
@@ -525,6 +526,15 @@ export default class Prs extends View {
       .child(box);
   }
 
+  // Copies the pull request's branch name; its button shows a check for a moment.
+  copyBranch(pr, cx) {
+    cx.write_to_clipboard(pr.headRefName);
+    this.copied = pr.url;
+    cx.notify();
+    this.copyTick?.cancel();
+    this.copyTick = cx.timer.after(1500, (cx) => { this.copied = null; cx.notify(); });
+  }
+
   detail(t) {
     const pr = this.all().find((p) => p.url === this.sel);
     if (!pr) return v_flex().flex_1().min_w(0).p(28).text_size(13).text_color(t.dim)
@@ -541,13 +551,21 @@ export default class Prs extends View {
         ...(events.length > 20 ? [h_flex().id("older").gap(6).items_center().text_size(13).text_color(t.accent).cursor_pointer()
           .on_click(() => open(pr.url)).child(svg(ICON("external-link")).size(13)).child(`${events.length - 20} older on GitHub`)] : [])];
 
-    // The header: state and repo with Hide at the right; the title, the main thing; who wants to merge what;
+    // The header, as GitHub's: the repo and age with Hide at the right; the title and number; the state and who wants to merge what;
     // a line; approvals, files and lines in one row; a line; the review status and the checks; then Review locally.
     // GitHub's state label: white on green while open, white on grey as a draft.
-    const state = h_flex().h(30).px(12).gap(6).flex_none().items_center().rounded_full().text_size(14)
+    const bold = (el) => el.font_family(".SystemUIFont").font_weight(600);
+    const state = bold(h_flex()).h(32).px(12).gap(4).mr(4).flex_none().items_center().rounded_full().text_size(14)
       .bg(pr.isDraft ? t.muted : t.solid).text_color("#ffffff")
-      .child(svg(ICON(pr.isDraft ? "git-pull-request-draft" : "git-pull-request")).size(14)).child(pr.isDraft ? "Draft" : "Open");
-    const branch = (name) => div().text_color(t.accent).child(name);
+      .child(svg(ICON(pr.isDraft ? "git-pull-request-draft" : "git-pull-request-arrow")).size(16)).child(pr.isDraft ? "Draft" : "Open");
+    const branch = (name) => div().h(22).px(6).flex_none().flex().items_center().rounded(6).bg(t.selected).text_color(t.accent)
+      .font_family(settings().font ?? "JetBrains Mono").text_size(12).child(name);
+    const commits = pr.allCommits.totalCount;
+    const copied = this.copied === pr.url;
+    const copy = h_flex().id("copy-branch").size(28).ml(2).flex_none().items_center().justify_center().rounded(6).text_color(copied ? t.ansi2 : t.muted)
+      .hover((s) => s.bg(t.hover)).role("button").accessibility_label("Copy the branch name").tooltip(copied ? "Copied" : "Copy the branch name")
+      .on_click((_e, cx) => this.copyBranch(pr, cx))
+      .child(svg(ICON(copied ? "check" : "copy")).size(16));
     const a = approval(pr, this.rules);
     const approvedCount = pr.reviewers.filter((r) => r.state === "APPROVED").length;
     const changes = pr.reviewers.some((r) => r.state === "CHANGES_REQUESTED");
@@ -556,20 +574,23 @@ export default class Prs extends View {
       : [approvedCount ? `${approvedCount} ${approvedCount === 1 ? "approval" : "approvals"}` : "No approvals", approvedCount ? t.ansi2 : t.foreground];
     const header = v_flex().id("header").w_full().min_w(0)
       .child(h_flex().gap(10).items_center()
-        .child(state)
-        .child(div().flex_1().min_w(0).truncate().text_size(13.5).text_color(t.muted).child(`${pr.repo} #${pr.number}`))
+        .child(div().flex_1().min_w(0).truncate().text_size(13.5).text_color(t.muted).child(`${pr.repo} · ${ago(pr.createdAt)} ago`))
         .child(this.button(t, "hide", isHidden ? "Show again" : "Hide", isHidden ? "chevron-down" : "eye-off", (cx) => { this.hide(pr, !isHidden); cx.notify(); }, isHidden ? "Show it in the list again" : "Hide it from the list until it closes")))
-      // The title opens the pull request on GitHub, its external-link icon at its end saying so.
-      .child(h_flex().id("title").mt(14).gap(8).items_center().cursor_pointer().text_color(t.foreground).hover((s) => s.text_color(t.accent))
+      // The title opens the pull request on GitHub, its external-link icon at its end saying so. Its words are laid out one by
+      // one, so a long title wraps with the number and the icon following its last word.
+      .child(h_flex().id("title").mt(8).gap_x(8).items_center().flex_wrap().cursor_pointer().text_size(32).line_height("40px").text_color(t.foreground).hover((s) => s.text_color(t.accent))
         .role("link").accessibility_label(`${pr.title}, open on GitHub`).tooltip("Open on GitHub").on_click(() => open(pr.url))
-        .child(div().flex_shrink(1).min_w(0).text_size(24).child(pr.title))
+        .children(pr.title.split(/\s+/).filter(Boolean).map((word) => div().child(word)))
+        .child(div().text_color(t.muted).child(`#${pr.number}`))
         .child(svg(ICON("external-link")).size(18).flex_none().text_color(t.dim)))
-      .child(h_flex().mt(10).gap(6).items_center().flex_wrap().text_size(14).text_color(t.muted)
-        .child(div().text_color(t.foreground).child(`${pr.author} wants to merge into`))
+      .child(h_flex().mt(8).gap_x(4).gap_y(6).items_center().flex_wrap().text_size(14).text_color(t.muted)
+        .child(state)
+        .child(bold(div()).child(pr.author))
+        .child(div().child(`wants to merge ${commits} ${commits === 1 ? "commit" : "commits"} into`))
         .child(branch(pr.baseRefName))
         .child(div().child("from"))
         .child(branch(`${pr.headRefName}${pr.isCrossRepository ? " (fork)" : ""}`))
-        .child(div().text_color(t.dim).child(`· ${ago(pr.createdAt)} ago`)))
+        .child(copy))
       .child(div().mt(18).h(1).w_full().bg(t.rule))
       .child(h_flex().mt(16).gap(18).items_center().text_size(14)
         .child(h_flex().gap(6).items_center().text_color(approvalColor).child(svg(ICON(changes ? "x" : "circle-check")).size(16)).child(approvalText))
