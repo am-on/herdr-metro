@@ -66,6 +66,7 @@ Project and checkout rows have no logo, so they use full-size marks in a 14px co
 - `theme().selected` and `theme().hover` are see-through; painting them on a row that already has them darkens it. Use solid `background` for the shown and hovered rows.
 - A `.hover()` style can't change a border color: track the pointer with `.on_hover` and style the row from that state.
 - `render` must not call `cx.notify()`; react to another mod through `run("<mod>.<command>")` and `nextCommand()`, not by watching shared state in `render`.
+- A checkout's `origin/HEAD` is written at clone and never follows a renamed default branch. Ask `git ls-remote --symref origin HEAD` for the review's base and the tab bar's behind count; the local ref only stands in offline.
 - A mod pane isn't told its pane or tab id. The review remembers its tab per copy in `localStorage`, claimed from the focused pane when it starts.
 - A mod opened in a tab just created in another space still sees the old space as active for a moment: pass the space and folder in its props.
 - The UI font, Geist, has one weight, so `font_weight` does nothing on it. The bold headings use the system font: `.font_family(".SystemUIFont").font_weight(700)`.

@@ -108,6 +108,7 @@ export default class Review extends View {
     this.input.on("submit", (_e, cx) => this.addComment(cx));
     this.handle = cx.focus_handle();
     this.known = {};
+    this.defaults = {}; // checkout root -> origin's default branch
     cx.spawn(async (cx) => {
       try { for (const a of await knownAgents({ on: where().on })) this.known[a.key] = a; } catch {}
       cx.notify();
@@ -192,10 +193,20 @@ export default class Review extends View {
     });
   }
 
-  // The branch's base: where it left the remote's default branch, else main or master.
-  async base(git) {
+  // The default branch origin names now, asked once per checkout: the local origin/HEAD keeps what it was at clone.
+  async originDefault(root, on) {
+    if (this.defaults[root]) return this.defaults[root];
+    const asked = await exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5", "git", "ls-remote", "--symref", "origin", "HEAD"], { cwd: root, on });
+    const name = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(asked.stdout)?.[1] ?? null;
+    if (name) this.defaults[root] = name;
+    return name;
+  }
+
+  // The branch's base: where it left origin's default branch, else the local origin/HEAD, main or master.
+  async base(git, root, on) {
+    const name = await this.originDefault(root, on);
     const head = await git(["rev-parse", "--abbrev-ref", "origin/HEAD"]);
-    const candidates = [head.code === 0 ? head.stdout.trim() : null, "origin/main", "main", "origin/master", "master"].filter(Boolean);
+    const candidates = [name && `origin/${name}`, head.code === 0 ? head.stdout.trim() : null, "origin/main", "main", "origin/master", "master"].filter(Boolean);
     for (const ref of candidates) {
       const mb = await git(["merge-base", "HEAD", ref]);
       if (mb.code === 0) return { sha: mb.stdout.trim(), name: ref };
@@ -217,7 +228,7 @@ export default class Review extends View {
         const root = top.stdout.trim(), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         let ref = "HEAD";
         if (mode === "branch") {
-          const b = await this.base(git);
+          const b = await this.base(git, root, on);
           if (!b) { this.files = []; this.error = "Couldn't find main or master to compare this branch with."; return; }
           ref = b.sha; this.baseName = b.name;
         } else if (mode === "last") {

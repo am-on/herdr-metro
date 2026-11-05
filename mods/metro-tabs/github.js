@@ -32,9 +32,12 @@ export async function lookup(cwd, machine, branch) {
 // without prompting: { base: "main", behind }, { base, failed: true } when origin can't be reached, or null (no origin,
 // it is the default branch).
 export async function staleness(cwd, machine, branch) {
-  const git = (args) => exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes", "git", ...args], { cwd, on: machine });
-  const head = await git(["rev-parse", "--abbrev-ref", "origin/HEAD"]);
-  let ref = head.code === 0 ? head.stdout.trim() : null;
+  const git = (args) => exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5", "git", ...args], { cwd, on: machine });
+  // Origin names its default branch itself: the local origin/HEAD keeps what it was at clone, so it only stands in offline.
+  const asked = await git(["ls-remote", "--symref", "origin", "HEAD"]);
+  const name = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(asked.stdout)?.[1];
+  const head = name ? null : await git(["rev-parse", "--abbrev-ref", "origin/HEAD"]);
+  let ref = name ? `origin/${name}` : head.code === 0 ? head.stdout.trim() : null;
   for (const r of ref ? [] : ["origin/main", "origin/master"]) {
     if ((await git(["rev-parse", "--verify", "--quiet", r])).code === 0) { ref = r; break; }
   }
