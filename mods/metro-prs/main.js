@@ -373,7 +373,8 @@ export default class Prs extends View {
           .when(pr.isDraft, (el) => el.child(this.pill(t, "plain", "Draft")))
           .children([this.approvalPill(t, pr)].filter(Boolean))
           .child(h_flex().flex_none().gap(5).items_center().children(faces.slice(0, 5).map(([l, v]) => this.avatar(t, l, 20, v, bg))))
-          .children([this.ci(t, pr.ci)].filter(Boolean))
+          // Only checks that need a look: beside the avatars, a green check would read as an approval.
+          .children(pr.ci === "SUCCESS" ? [] : [this.ci(t, pr.ci)].filter(Boolean))
           .child(div().flex_1())
           .child(div().flex_none().text_color(t.dim).child(ago(pr.updatedAt)))));
   }
