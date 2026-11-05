@@ -2,10 +2,12 @@
 // own, across GitHub, each with its reviewers' avatars badged with their verdict; on the right, the selected one: who
 // reviewed, its checks and branch, and its conversation, with Open on GitHub, Check out and review, and Hide.
 // Hidden ones (shared `metro-prs.hidden`, by URL, until they close) fold under their section.
+// A review request is new until its pull request has been shown here (shared `metro-prs.seen`): a blue dot on its row,
+// and one on the brand bar's button while any are new.
 // Reviewing a repo that isn't here yet offers a clone found nearby, cloning it, or opening its folder; each joins the sidebar's projects.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar, TextView } from "gpui-base";
-import { run, spaces, panes, shared, setShared, nextCommand, settings, home, pickFolder } from "herdr";
+import { run, spaces, panes, shared, setShared, nextCommand, settings, home, pickFolder, layout } from "herdr";
 import { pulls, conversation, checkouts, checkout, clone, exists, nearby, renamed, sameRepo, open, approval, approvalRules, cachedAvatars, fetchAvatars, avatarFile, avatarKey } from "./github.js";
 
 // Looked up again this often, and on Refresh.
@@ -24,6 +26,17 @@ function place(s) {
 const spaceAt = (path) => spaces().find((s) => !s.machine && (place(s) === path || place(s)?.startsWith(path + "/")));
 const after = (cx, ms) => new Promise((done) => cx.timer.after(ms, () => done()));
 const hidden = () => new Set(shared("metro-prs.hidden") ?? []);
+// Which review request of each pull request was shown here: URL -> its `askedAt`.
+const seen = () => shared("metro-prs.seen") ?? {};
+const isNew = (pr) => Boolean(pr.askedAt) && seen()[pr.url] !== pr.askedAt;
+function find(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = find(child, id);
+    if (found) return found;
+  }
+  return null;
+}
 const tilde = (path) => (path.startsWith(home()) ? `~${path.slice(home().length)}` : path);
 // The colors metro-spaces deals out to projects.
 const COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
@@ -104,7 +117,10 @@ export default class Prs extends View {
         // A hidden one that closed is forgotten.
         const open = new Set(this.all().map((pr) => pr.url)), was = shared("metro-prs.hidden") ?? [];
         if (was.some((u) => !open.has(u))) setShared("metro-prs.hidden", was.filter((u) => open.has(u)));
-        this.publishWaiting();
+        // So is what was seen of one no longer asking for your review.
+        const asking = new Set(this.data.asked.map((pr) => pr.url)), read = Object.entries(seen());
+        if (read.some(([u]) => !asking.has(u))) setShared("metro-prs.seen", Object.fromEntries(read.filter(([u]) => asking.has(u))));
+        this.publishNew();
         const sel = this.all().find((pr) => pr.url === this.sel) ?? this.visible()[0];
         this.sel = sel?.url ?? null;
         if (sel) this.loadDetail(sel, cx);
@@ -157,18 +173,26 @@ export default class Prs extends View {
       .flatMap(([id, list]) => [...list.filter((pr) => !off.has(pr.url)), ...(this.showHidden[id] ? list.filter((pr) => off.has(pr.url)) : [])]);
   }
 
-  // How many shown pull requests wait on your review, for the brand bar's count.
-  publishWaiting() {
+  // How many review requests are new, hidden ones left out, for the brand bar's dot.
+  publishNew() {
     if (!this.data) return;
-    const off = hidden(), n = this.data.asked.filter((pr) => !off.has(pr.url)).length;
-    if (shared("metro-prs.waiting") !== n) setShared("metro-prs.waiting", n);
+    const off = hidden(), n = this.data.asked.filter((pr) => !off.has(pr.url) && isNew(pr)).length;
+    if (shared("metro-prs.new") !== n) setShared("metro-prs.new", n);
+  }
+
+  // The selected pull request counts as seen once this view is on screen.
+  markSeen() {
+    const pr = this.all().find((p) => p.url === this.sel);
+    if (!pr || !isNew(pr) || find(layout(), "view")?.active !== "prs") return;
+    setShared("metro-prs.seen", { ...seen(), [pr.url]: pr.askedAt });
+    this.publishNew();
   }
 
   hide(pr, on) {
     const off = hidden();
     if (on) off.add(pr.url); else off.delete(pr.url);
     setShared("metro-prs.hidden", [...off]);
-    this.publishWaiting();
+    this.publishNew();
   }
 
   // Shows the pull request's checkout: its space, made (with a worktree) when there's none, and a Review tab there on
@@ -333,10 +357,12 @@ export default class Prs extends View {
     const bg = chosen ? t.selected : lit ? t.chrome : t.background;
     const faces = [...pr.reviewers.map((r) => [r.login, r.state]), ...(mine ? pr.requested.map((l) => [l, "WAIT"]) : [])];
     // Rows are split by hairlines, as GitHub splits its lists; the selected one has a blue bar on its left.
+    const fresh = isNew(pr);
     return h_flex().id(`pr-${key}`).w_full().min_w(0).relative().pl(16).pr(16).py(11).gap(10).flex_none().items_start()
       .bg(bg).border_b(1).border_color(t.rule).when(isHidden, (el) => el.opacity(0.55))
       .when(chosen, (el) => el.child(div().absolute().left(0).top(0).bottom(0).w(3).bg(t.accent)))
-      .role("button").accessibility_label(`#${pr.number} ${pr.title}`)
+      .when(fresh, (el) => el.child(div().absolute().left(5).top(17).size(6).rounded_full().bg(t.accent)))
+      .role("button").accessibility_label(`${fresh ? "New: " : ""}#${pr.number} ${pr.title}`)
       .on_hover((on, cx) => { if (on) this.hovered = key; else if (this.hovered === key) this.hovered = null; cx.notify(); })
       .on_click((e, cx) => { this.handle.focus(); if (e.click_count === 2) open(pr.url); this.select(pr, cx); })
       .child(div().pt(1).flex_none().child(this.prIcon(t, pr)))
@@ -356,13 +382,12 @@ export default class Prs extends View {
     const off = hidden(), list = all.filter((pr) => !off.has(pr.url)), away = all.filter((pr) => off.has(pr.url));
     const unfolded = this.showHidden[id] && away.length > 0;
     return [
-      // A heading bar as GitHub heads a list: 16px sentence case on grey between lines; the count is red while someone
-      // waits on your review.
+      // A heading bar as GitHub heads a list: 16px sentence case on grey between lines.
       h_flex().id(id).h(44).px(16).gap(8).flex_none().items_center().text_size(16).text_color(t.foreground)
         .bg(t.chrome).border_b(1).border_color(t.border).when(id !== "asked", (el) => el.border_t(1))
         .child(div().child(label))
         .child(h_flex().h(20).min_w(20).px(6).rounded_full().items_center().justify_center().text_size(12)
-          .bg(!mine && list.length ? t.blocked : t.counter).text_color(!mine && list.length ? "#ffffff" : t.foreground).child(String(list.length))),
+          .bg(t.counter).text_color(t.foreground).child(String(list.length))),
       ...list.map((pr) => this.item(t, pr, mine, false)),
       ...(list.length ? [] : [div().px(16).py(12).text_size(12.5).text_color(t.dim).child(!mine ? "Nothing to review." : away.length ? "Nothing to show." : "You have no open pull requests.")]),
       // The hidden ones fold into a row under the section: "2 hidden", click to see them dimmed.
@@ -622,6 +647,7 @@ export default class Prs extends View {
 
   render() {
     const t = palette();
+    this.markSeen();
     // Dragging the list's right edge sets its width.
     const edge = div().id("list-edge").w(5).ml(-3).h_full().flex_none().cursor_col_resize().hover((s) => s.bg(t.accent + "55"))
       .when(Boolean(this.drag), (el) => el.bg(t.accent + "55"))

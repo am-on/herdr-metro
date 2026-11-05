@@ -11,10 +11,14 @@ const FIELDS = `number title url isDraft createdAt updatedAt headRefName baseRef
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
   allCommits: commits { totalCount }`;
 
+// When reviews were requested, for `askedAt`.
+const REQUESTS = `timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 20) { nodes { ... on ReviewRequestedEvent {
+  createdAt requestedReviewer { ... on User { login } ... on Team { slug } } } } }`;
+
 const QUERY = `query($mine: String!, $asked: String!) {
   viewer { login avatarUrl(size: 64) }
   mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${FIELDS} } } }
-  asked: search(query: $asked, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${FIELDS} } } }
+  asked: search(query: $asked, type: ISSUE, first: 50) { nodes { ... on PullRequest { ${FIELDS} ${REQUESTS} } } }
 }`;
 
 const DETAIL = `query($owner: String!, $name: String!, $number: Int!) {
@@ -38,6 +42,9 @@ async function graphql(query, fields) {
 // Every avatar URL a response names, by login, for `avatars`.
 export const faces = {};
 const seen = (author) => { if (author?.login && author.avatarUrl) faces[author.login] = author.avatarUrl; return author?.login ?? "ghost"; };
+
+// When your review was last requested, directly or through a team; a new request is the only thing that changes it.
+const askedAt = (pr, me) => pr.timelineItems.nodes.filter((e) => e.requestedReviewer?.slug || e.requestedReviewer?.login === me).at(-1)?.createdAt ?? pr.createdAt;
 
 // { me, mine, asked }: the open pull requests you wrote and the ones asking for your review, the latest updated first.
 // A pull request's `reviewers` are everyone but its author who reviewed or commented, with their latest verdict
@@ -66,7 +73,8 @@ export async function pulls() {
       .filter((l) => l && !verdict.has(l));
     return { ...pr, author, repo: pr.repository.nameWithOwner, reviewers, requested, ci: pr.commits.nodes[0]?.commit.statusCheckRollup?.state ?? null };
   };
-  return { me, mine: data.mine.nodes.filter((n) => n.number).map(shape), asked: data.asked.nodes.filter((n) => n.number).map(shape) };
+  return { me, mine: data.mine.nodes.filter((n) => n.number).map(shape),
+    asked: data.asked.nodes.filter((n) => n.number).map((pr) => ({ ...shape(pr), askedAt: askedAt(pr, me) })) };
 }
 
 // One pull request's conversation, newest first (comments, and reviews that said something, with their comments on
