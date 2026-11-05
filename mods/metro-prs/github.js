@@ -213,34 +213,58 @@ export const exists = async (path) => (await exec("test", ["-e", path])).code ==
 // Checkouts go to ~/.herdr/worktrees/<repo>/<branch, slashes as dashes>, as metro-worktree makes them.
 const slug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 
-// The folder where a pull request's branch is checked out, made a worktree of `main` when it isn't yet, and brought up
-// to date with origin when it is clean. A pull request from a fork is GitHub's pull/<n>/head, kept here as pr/<n>.
+// Commits of `ref` that were never on a remote. Everything `tracked` has pointed at counts as on one, as a force-push
+// leaves what it replaced on no remote branch: its reflog, and the value before the log's first entry, `@{<entries>}`.
+async function own(cwd, ref, tracked) {
+  const seen = tracked ? (await git(cwd, ["reflog", "show", "--format=%H", tracked])).out.split("\n").filter(Boolean) : [];
+  const first = seen.length ? await git(cwd, ["rev-parse", "--verify", "--quiet", `${tracked}@{${seen.length}}`]) : { ok: false };
+  const r = await git(cwd, ["rev-list", "--count", ref, "--not", "--remotes", ...seen, ...(first.ok ? [first.out] : [])]);
+  return r.ok ? Number(r.out) : Infinity;
+}
+
+// Why a checkout wasn't updated, short enough for a toast, and what to do about it.
+const stale = (why, next) => ({ why, next: `${next}, then click Review locally again.` });
+
+// Moves `branch` to the pull request's `tip`, in `folder` when it's checked out there, unless that would lose work.
+// Resolves with what kept it from matching, as `stale`, or null. A pull request's force-push moves it too.
+async function update(main, branch, tip, tracked, folder) {
+  const ref = `refs/heads/${branch}`;
+  const apart = await git(main, ["rev-list", "--left-right", "--count", `${ref}...${tip}`]);
+  if (!apart.ok) return stale("Git couldn't compare it.", `${apart.err}. Fix that`);
+  const [ahead, behind] = apart.out.split(/\s+/).map(Number);
+  if (!ahead && !behind) return null;
+  if (ahead && (await own(main, ref, tracked))) return stale("It has commits that aren't on origin.", tracked ? "Push or move them" : `The pull request may have been force-pushed. If they aren't yours, remove this worktree and delete ${branch}`);
+  if (folder) {
+    const changes = await git(folder, ["status", "--porcelain", "--untracked-files=no"]);
+    if (!changes.ok || changes.out) return stale("It has uncommitted changes.", "Commit or stash them");
+  }
+  const move = folder ? await git(folder, ["reset", "--keep", "--quiet", tip]) : await git(main, ["branch", "--force", branch, tip]);
+  return move.ok ? null : stale("Git couldn't move it.", `${move.err.replace(/^(error|fatal): /, "").replace(/\.$/, "")}. Fix that`);
+}
+
+// The folder where a pull request's branch is checked out, made a worktree of `main` when it isn't yet, and a warning
+// when that checkout doesn't match the pull request, else null. A pull request from a fork is GitHub's pull/<n>/head,
+// kept here as pr/<n>.
 export async function checkout(main, pr) {
-  const branch = pr.isCrossRepository ? `pr/${pr.number}` : pr.headRefName;
-  const source = pr.isCrossRepository ? `pull/${pr.number}/head` : `refs/heads/${branch}`;
+  const fork = pr.isCrossRepository;
+  const branch = fork ? `pr/${pr.number}` : pr.headRefName;
+  const source = fork ? `pull/${pr.number}/head` : `refs/heads/${branch}`;
+  const tracked = fork ? null : `refs/remotes/origin/${branch}`;
+  const fetched = await git(main, ["fetch", "--quiet", "--no-tags", "origin", fork ? source : `+${source}:${tracked}`]);
   const list = await git(main, ["worktree", "list", "--porcelain"]);
   const found = list.out.split(/\n\n+/).map((b) => b.split("\n"))
     .find((lines) => lines.includes(`branch refs/heads/${branch}`))?.find((l) => l.startsWith("worktree "))?.slice(9);
-  if (found) {
-    const clean = await git(found, ["status", "--porcelain"]);
-    if (clean.ok && !clean.out && (await git(found, ["fetch", "--quiet", "--no-tags", "origin", source])).ok) await git(found, ["merge", "--ff-only", "--quiet", "FETCH_HEAD"]);
-    return found;
-  }
-  const has = async (ref) => (await git(main, ["show-ref", "--verify", "--quiet", ref])).ok;
+  const local = found || (await git(main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).ok;
+  if (!local && !fetched.ok) throw new Error(`Couldn't fetch ${fork ? `#${pr.number}` : branch} from origin: ${fetched.err}`);
+  const tip = fetched.ok ? (await git(main, ["rev-parse", "FETCH_HEAD"])).out : null;
+  const warning = !local ? null
+    : tip ? await update(main, branch, tip, tracked, found)
+    : stale("Origin couldn't be reached.", "This may not be the latest push. Check your connection");
+  if (found) return { path: found, warning };
   const path = `${home()}/.herdr/worktrees/${main.split("/").pop()}/${slug(branch)}`;
-  if (!(await has(`refs/heads/${branch}`))) {
-    const into = pr.isCrossRepository ? `refs/heads/${branch}` : `refs/remotes/origin/${branch}`;
-    const f = await git(main, ["fetch", "--quiet", "--no-tags", "origin", `${source}:${into}`]);
-    if (!f.ok) throw new Error(`Couldn't fetch ${pr.isCrossRepository ? `#${pr.number}` : branch} from origin: ${f.err}`);
-    if (!pr.isCrossRepository) {
-      const add = await git(main, ["worktree", "add", "--track", "-b", branch, path, `origin/${branch}`]);
-      if (!add.ok) throw new Error(add.err || "git worktree add failed.");
-      return path;
-    }
-  }
-  const add = await git(main, ["worktree", "add", path, branch]);
+  const add = await git(main, ["worktree", "add", "--quiet", ...(local ? [path, branch] : fork ? ["-b", branch, path, tip] : ["--track", "-b", branch, path, `origin/${branch}`])]);
   if (!add.ok) throw new Error(add.err || "git worktree add failed.");
-  return path;
+  return { path, warning };
 }
 
 export const open = (url) => exec("open", [url]).catch(() => {});

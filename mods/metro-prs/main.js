@@ -7,7 +7,7 @@
 // Reviewing a repo that isn't here yet offers a clone found nearby, cloning it, or opening its folder; each joins the sidebar's projects.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar, TextView } from "gpui-base";
-import { run, spaces, panes, shared, setShared, nextCommand, settings, home, pickFolder, layout } from "herdr";
+import { run, spaces, panes, shared, setShared, nextCommand, settings, home, pickFolder, layout, notify } from "herdr";
 import { pulls, conversation, checkouts, checkout, clone, exists, nearby, renamed, sameRepo, open, approval, approvalRules, cachedAvatars, fetchAvatars, avatarFile, avatarKey } from "./github.js";
 
 // Looked up again this often, and on Refresh.
@@ -82,6 +82,7 @@ export default class Prs extends View {
     this.avatars = new Set(); // avatar files downloaded, by avatarKey
     this.busy = {}; // url -> true while its checkout opens
     this.errors = {}; // url -> why its checkout didn't open
+    this.warnings = {}; // url -> why its checkout doesn't match it
     this.setup = {}; // "owner/repo" not here yet -> { busy: "pick" | "clone" | null, error, found, path }, while its card shows
     this.showHidden = {}; // section id -> its hidden ones are unfolded
     this.copied = null; // the URL of the pull request whose branch name was just copied
@@ -202,6 +203,7 @@ export default class Prs extends View {
     if (this.busy[pr.url] || this.setup[repo]?.busy) return;
     this.busy[pr.url] = true;
     delete this.errors[pr.url];
+    delete this.warnings[pr.url];
     cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -216,7 +218,7 @@ export default class Prs extends View {
           return cx.notify();
         }
         delete this.setup[repo];
-        const path = await checkout(main, pr);
+        const { path, warning } = await checkout(main, pr);
         let s = spaceAt(path);
         if (!s) {
           run("space.new", { folder: path });
@@ -229,6 +231,11 @@ export default class Prs extends View {
         const shown = panes().find((p) => p.mod === "metro-review" && tabs.has(p.tab));
         if (shown) run("tab.select", { id: shown.tab });
         else run("tab.new", { space: s.id, name: "Review", mod: "metro-review", props: { folder: path, space: s.id, machine: null, mode: "branch" } });
+        // The toast shows a line and goes, so the whole warning stays under Review locally, a click away.
+        if (warning) {
+          this.warnings[pr.url] = warning;
+          notify({ title: `Couldn't update the checkout of #${pr.number}`, body: warning.why, level: "warning", action: { name: "layout.select", args: { stack: "view", child: "prs" } } });
+        }
       } catch (e) {
         this.errors[pr.url] = `${e.message ?? e}`;
       }
@@ -567,7 +574,7 @@ export default class Prs extends View {
       .child(this.data && !this.all().length ? "No open pull requests to show." : this.data ? "Select a pull request." : "");
     const d = this.details.get(pr.url) ?? {};
     const isHidden = hidden().has(pr.url);
-    const busy = this.busy[pr.url], error = this.errors[pr.url], setup = this.setup[pr.repo.toLowerCase()];
+    const busy = this.busy[pr.url], error = this.errors[pr.url], warning = this.warnings[pr.url], setup = this.setup[pr.repo.toLowerCase()];
 
     const events = d.events ?? [];
     const conversation = d.error ? [div().text_size(13).text_color(t.blocked).child(d.error)]
@@ -631,7 +638,8 @@ export default class Prs extends View {
         // A fixed width, so "Checking out…" doesn't change its size.
         .child(this.button(t, "check-out", setup?.busy === "clone" ? "Cloning…" : busy ? "Checking out…" : "Review locally", "git-pull-request", (cx) => this.checkOut(pr, cx), "Check it out in a worktree and open a Review tab", true).min_w(176).justify_center()))
       .when(Boolean(setup), (el) => el.child(this.setupCard(t, pr, setup)))
-      .when(Boolean(error), (el) => el.child(div().mt(10).text_size(13).text_color(t.blocked).child(error)));
+      .when(Boolean(error), (el) => el.child(div().mt(10).text_size(13).text_color(t.blocked).child(error)))
+      .when(Boolean(warning), (el) => el.child(div().mt(10).text_size(13).text_color(t.working).child(`Couldn't update your checkout. ${warning.why} ${warning.next}`)));
 
     const body = v_flex().w_full().max_w(900).px(24).pt(20).pb(40).gap(14)
       .child(header)
