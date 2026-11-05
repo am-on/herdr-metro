@@ -2,10 +2,11 @@
 // own, across GitHub, each with its reviewers' avatars badged with their verdict; on the right, the selected one: who
 // reviewed, its checks and branch, and its conversation, with Open on GitHub, Check out and review, and Hide.
 // Hidden ones (shared `metro-prs.hidden`, by URL, until they close) fold under their section.
+// Reviewing a repo that isn't here yet offers a clone found nearby, cloning it, or opening its folder; each joins the sidebar's projects.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar, TextView } from "gpui-base";
-import { run, spaces, panes, shared, setShared, nextCommand, settings } from "herdr";
-import { pulls, conversation, checkouts, checkout, open, approval, approvalRules, cachedAvatars, fetchAvatars, avatarFile, avatarKey } from "./github.js";
+import { run, spaces, panes, shared, setShared, nextCommand, settings, home, pickFolder } from "herdr";
+import { pulls, conversation, checkouts, checkout, clone, exists, nearby, renamed, sameRepo, open, approval, approvalRules, cachedAvatars, fetchAvatars, avatarFile, avatarKey } from "./github.js";
 
 // Looked up again this often, and on Refresh.
 const EVERY = 180000;
@@ -23,6 +24,9 @@ function place(s) {
 const spaceAt = (path) => spaces().find((s) => !s.machine && (place(s) === path || place(s)?.startsWith(path + "/")));
 const after = (cx, ms) => new Promise((done) => cx.timer.after(ms, () => done()));
 const hidden = () => new Set(shared("metro-prs.hidden") ?? []);
+const tilde = (path) => (path.startsWith(home()) ? `~${path.slice(home().length)}` : path);
+// The colors metro-spaces deals out to projects.
+const COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 
 const ago = (iso) => {
   const d = (Date.now() - Date.parse(iso)) / 1000;
@@ -65,6 +69,7 @@ export default class Prs extends View {
     this.avatars = new Set(); // avatar files downloaded, by avatarKey
     this.busy = {}; // url -> true while its checkout opens
     this.errors = {}; // url -> why its checkout didn't open
+    this.setup = {}; // "owner/repo" not here yet -> { busy: "pick" | "clone" | null, error, found, path }, while its card shows
     this.showHidden = {}; // section id -> its hidden ones are unfolded
     this.handle = cx.focus_handle();
     this.listWidth = savedWidth();
@@ -79,16 +84,20 @@ export default class Prs extends View {
     return this.data ? [...this.data.asked, ...this.data.mine] : [];
   }
 
+  // The folders repos are checked out in here: every space's, and the projects kept in the sidebar.
+  folders() {
+    const folders = new Set(spaces().filter((s) => !s.machine).map(place).filter(Boolean));
+    for (const k of shared("projects.kept") ?? []) if (!k.machine && !k.folder && k.path) folders.add(k.path);
+    return [...folders];
+  }
+
   refresh(cx) {
     if (this.loading) return;
     this.loading = true;
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        // The repos checked out here: every space's, and the projects kept in the sidebar.
-        const folders = new Set(spaces().filter((s) => !s.machine).map(place).filter(Boolean));
-        for (const k of shared("projects.kept") ?? []) if (!k.machine && !k.folder && k.path) folders.add(k.path);
-        const [data, repos, rules, have] = await Promise.all([pulls(), checkouts([...folders]), approvalRules(), cachedAvatars()]);
+        const [data, repos, rules, have] = await Promise.all([pulls(), checkouts(this.folders()), approvalRules(), cachedAvatars()]);
         this.data = data; this.repos = repos; this.rules = rules.rules; this.ruleError = rules.error; this.avatars = have;
         this.error = ""; this.at = Date.now();
         // A hidden one that closed is forgotten.
@@ -162,19 +171,26 @@ export default class Prs extends View {
   }
 
   // Shows the pull request's checkout: its space, made (with a worktree) when there's none, and a Review tab there on
-  // the branch (or the space's Review tab).
+  // the branch (or the space's Review tab). A repo that isn't here yet shows its card instead.
   checkOut(pr, cx) {
-    const main = this.repos[pr.repo.toLowerCase()];
-    if (!main) {
-      this.errors[pr.url] = `${pr.repo.split("/")[1]} isn't checked out on this machine. Open a clone of it as a space, then try again.`;
-      return cx.notify();
-    }
-    if (this.busy[pr.url]) return;
+    const repo = pr.repo.toLowerCase();
+    if (this.busy[pr.url] || this.setup[repo]?.busy) return;
     this.busy[pr.url] = true;
     delete this.errors[pr.url];
     cx.notify();
     cx.spawn(async (cx) => {
       try {
+        // A space opened since the last look counts.
+        if (!this.repos[repo]) this.repos = await checkouts(this.folders());
+        const main = this.repos[repo] ??= await renamed(pr.repo, this.repos);
+        if (!main) {
+          delete this.repos[repo];
+          const found = await nearby(pr.repo, this.repos);
+          this.setup[repo] = { busy: null, error: "", ...this.setup[repo], found };
+          delete this.busy[pr.url];
+          return cx.notify();
+        }
+        delete this.setup[repo];
         const path = await checkout(main, pr);
         let s = spaceAt(path);
         if (!s) {
@@ -193,6 +209,75 @@ export default class Prs extends View {
       }
       delete this.busy[pr.url];
       cx.notify();
+    });
+  }
+
+  // The repo's main checkout in this folder. Anything else there is an error ending in `next`, what to do about it.
+  async cloneAt(folder, pr, next) {
+    const [origin, main] = Object.entries(await checkouts([folder]))[0] ?? [];
+    if (origin && await sameRepo(origin, pr.repo)) return main;
+    throw new Error(`${tilde(folder)} ${origin ? `is a clone of ${origin}, not ${pr.repo}` : `isn't a clone of ${pr.repo}`}. ${next}`);
+  }
+
+  // Lists the repo in the sidebar's projects, kept there once its spaces close. One already listed stays as it is.
+  addProject(main) {
+    if (Object.values(this.repos).includes(main)) return;
+    const name = main.split("/").pop(), key = JSON.stringify([null, `${main}/.git`]);
+    const kept = (shared("projects.kept") ?? []).filter((k) => k.key !== key);
+    const used = [...Object.values(shared("space.colors") ?? {}), ...kept.map((k) => k.color)];
+    const uses = (c) => used.filter((v) => v === c).length;
+    const color = COLORS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
+    setShared("projects.kept", [...kept, { key, name, initial: null, folder: false, path: main, machine: null, color, space: null }]);
+  }
+
+  // One way of bringing a repo here: `find` resolves with its main checkout, or nothing to stay on the card. The
+  // repo then joins the projects and the review goes on.
+  bring(pr, cx, busy, find) {
+    const repo = pr.repo.toLowerCase(), s = this.setup[repo];
+    if (!s || s.busy) return;
+    s.busy = busy;
+    s.error = "";
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const main = await find(s, cx);
+        s.busy = null;
+        if (main) {
+          this.addProject(main);
+          this.repos[repo] = main;
+          return this.checkOut(pr, cx);
+        }
+      } catch (e) {
+        s.busy = null;
+        s.error = `${e.message ?? e}`;
+      }
+      cx.notify();
+    });
+  }
+
+  openFolder(pr, cx) {
+    this.bring(pr, cx, "pick", async () => {
+      const folder = await pickFolder({ prompt: "Use this folder" });
+      return folder && this.cloneAt(folder, pr, "Open the folder of your clone, or clone it.");
+    });
+  }
+
+  // Clones into the chosen folder; choosing the clone itself uses it.
+  cloneRepo(pr, cx) {
+    this.bring(pr, cx, "pick", async (s, cx) => {
+      const folder = await pickFolder({ prompt: "Clone here" });
+      if (!folder) return null;
+      const here = await this.cloneAt(folder, pr, "").catch(() => null);
+      if (here) return here;
+      const path = `${folder}/${pr.repo.split("/")[1]}`;
+      if (!(await exists(path))) {
+        s.busy = "clone";
+        s.path = path;
+        cx.notify();
+        try { await clone(pr.repo, path); }
+        catch (e) { throw new Error(`Couldn't clone ${pr.repo}: ${e.message ?? e}. Check that \`gh auth status\` works in a terminal, then try again.`); }
+      }
+      return this.cloneAt(path, pr, "Clone it to another folder, or open the folder of your clone.");
     });
   }
 
@@ -319,6 +404,22 @@ export default class Prs extends View {
       .when(Boolean(icon), (el) => el.child(svg(ICON(icon)).size(15))).child(label);
   }
 
+  // Under Review locally when the repo isn't here yet: use the clone found nearby, clone it, or say where it is.
+  setupCard(t, pr, s) {
+    const found = s.found && tilde(s.found);
+    return v_flex().id("setup").mt(12).p(16).gap(12).rounded(6).border(1).border_color(t.border).bg(t.chrome)
+      .child(v_flex().gap(4)
+        .child(div().text_size(14).text_color(t.foreground).child(`${pr.repo.split("/")[1]} isn't in your projects yet`))
+        .child(div().text_size(13).text_color(t.muted).child(`${found ? `It looks like it's already in ${found}.` : "Clone it, or open its folder if you already have it."} It joins your projects and the review opens.`)))
+      .child(s.busy === "clone"
+        ? h_flex().h(34).gap(8).items_center().text_size(13.5).text_color(t.muted).child(svg(ICON("spinner")).size(14).spin(900)).child(`Cloning ${pr.repo} to ${tilde(s.path)}…`)
+        : h_flex().gap(10).items_center().flex_wrap()
+          .when(Boolean(found), (el) => el.child(this.button(t, "setup-found", `Use ${found}`, "folder", (cx) => this.bring(pr, cx, "pick", async () => s.found), `Add ${s.found} to your projects and review there`, true)))
+          .child(this.button(t, "setup-clone", "Clone…", "github", (cx) => this.cloneRepo(pr, cx), `Choose where to clone ${pr.repo}`))
+          .child(this.button(t, "setup-folder", "Open existing folder…", "folder", (cx) => this.openFolder(pr, cx), `Choose the folder of your ${pr.repo} clone`)))
+      .when(Boolean(s.error), (el) => el.child(div().text_size(13).text_color(t.blocked).child(s.error)));
+  }
+
   // A card's heading, with an optional summary pill at its right.
   cardHead(t, title, pill) {
     return h_flex().w_full().gap(8).items_center()
@@ -430,7 +531,7 @@ export default class Prs extends View {
       .child(this.data && !this.all().length ? "No open pull requests to show." : this.data ? "Select a pull request." : "");
     const d = this.details.get(pr.url) ?? {};
     const isHidden = hidden().has(pr.url);
-    const busy = this.busy[pr.url], error = this.errors[pr.url];
+    const busy = this.busy[pr.url], error = this.errors[pr.url], setup = this.setup[pr.repo.toLowerCase()];
 
     const events = d.events ?? [];
     const conversation = d.error ? [div().text_size(13).text_color(t.blocked).child(d.error)]
@@ -481,7 +582,8 @@ export default class Prs extends View {
       .children(pr.ci ? [div().mt(18).child(this.checksCard(t, pr, d))] : [])
       .child(h_flex().mt(20).gap(10).items_center()
         // A fixed width, so "Checking out…" doesn't change its size.
-        .child(this.button(t, "check-out", busy ? "Checking out…" : "Review locally", "git-pull-request", (cx) => this.checkOut(pr, cx), "Check it out in a worktree and open a Review tab", true).min_w(176).justify_center()))
+        .child(this.button(t, "check-out", setup?.busy === "clone" ? "Cloning…" : busy ? "Checking out…" : "Review locally", "git-pull-request", (cx) => this.checkOut(pr, cx), "Check it out in a worktree and open a Review tab", true).min_w(176).justify_center()))
+      .when(Boolean(setup), (el) => el.child(this.setupCard(t, pr, setup)))
       .when(Boolean(error), (el) => el.child(div().mt(10).text_size(13).text_color(t.blocked).child(error)));
 
     const body = v_flex().w_full().max_w(900).px(24).pt(20).pb(40).gap(14)

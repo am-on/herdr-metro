@@ -143,8 +143,11 @@ export function repoOf(url) {
   return m ? `${m[1]}/${m[2]}` : null;
 }
 
+// Asks nothing: a program with no terminal can't answer a password prompt.
+const QUIET = ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"];
+
 const git = async (cwd, args) => {
-  const r = await exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes", "git", ...args], { cwd });
+  const r = await exec("env", [...QUIET, "git", ...args], { cwd });
   return { ok: r.code === 0, out: (r.stdout ?? "").trim(), err: (r.stderr || r.stdout || "").trim().split("\n")[0] };
 };
 
@@ -162,6 +165,42 @@ export async function checkouts(folders) {
   }
   return out;
 }
+
+const short = (repo) => repo.split("/")[1].toLowerCase();
+
+// Whether a checkout's origin is this repo: by name, or by what GitHub calls it now, a moved or renamed repo still
+// answering to its old name. A fork is its own repo.
+export async function sameRepo(origin, repo) {
+  if (origin.toLowerCase() === repo.toLowerCase()) return true;
+  const r = await exec("gh", ["api", `repos/${origin}`, "--jq", ".full_name"]);
+  return r.code === 0 && r.stdout.trim().toLowerCase() === repo.toLowerCase();
+}
+
+// The main checkout among `known` ("owner/repo" -> path) of a repo it lists under an old name, or null.
+export async function renamed(repo, known) {
+  for (const [origin, main] of Object.entries(known)) if (short(origin) === short(repo) && await sameRepo(origin, repo)) return main;
+  return null;
+}
+
+// A clone of the repo in a folder of its name, beside the `known` checkouts or in home, or null.
+export async function nearby(repo, known) {
+  const parents = new Set([...Object.values(known).map((main) => main.slice(0, main.lastIndexOf("/"))), home()]);
+  for (const parent of parents) {
+    const path = `${parent}/${repo.split("/")[1]}`;
+    if (!(await exists(path))) continue;
+    const [origin, main] = Object.entries(await checkouts([path]))[0] ?? [];
+    if (origin && await sameRepo(origin, repo)) return main;
+  }
+  return null;
+}
+
+// Clones owner/repo into this folder, which doesn't exist yet.
+export async function clone(repo, path) {
+  const r = await exec("env", [...QUIET, "gh", "repo", "clone", repo, path]);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout || "gh repo clone failed.").trim().split("\n").pop().replace(/^fatal: /, ""));
+}
+
+export const exists = async (path) => (await exec("test", ["-e", path])).code === 0;
 
 // Checkouts go to ~/.herdr/worktrees/<repo>/<branch, slashes as dashes>, as metro-worktree makes them.
 const slug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
