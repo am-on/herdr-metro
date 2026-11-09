@@ -154,6 +154,10 @@ export function repoOf(url) {
 // Asks nothing: a program with no terminal can't answer a password prompt.
 const QUIET = ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"];
 
+// GitHub over HTTPS with gh's token, so an SSH origin never asks the SSH agent to sign: only here, as another machine
+// may have no gh.
+const overHttps = (on) => on ? [] : ["-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "url.https://github.com/.insteadOf=ssh://git@github.com/", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
+
 const git = async (cwd, args) => {
   const r = await exec("env", [...QUIET, "git", ...args], { cwd });
   return { ok: r.code === 0, out: (r.stdout ?? "").trim(), err: (r.stderr || r.stdout || "").trim().split("\n")[0] };
@@ -250,7 +254,7 @@ export async function checkout(main, pr) {
   const branch = fork ? `pr/${pr.number}` : pr.headRefName;
   const source = fork ? `pull/${pr.number}/head` : `refs/heads/${branch}`;
   const tracked = fork ? null : `refs/remotes/origin/${branch}`;
-  const fetched = await git(main, ["fetch", "--quiet", "--no-tags", "origin", fork ? source : `+${source}:${tracked}`]);
+  const fetched = await git(main, [...overHttps(null), "fetch", "--quiet", "--no-tags", "origin", fork ? source : `+${source}:${tracked}`]);
   const list = await git(main, ["worktree", "list", "--porcelain"]);
   const found = list.out.split(/\n\n+/).map((b) => b.split("\n"))
     .find((lines) => lines.includes(`branch refs/heads/${branch}`))?.find((l) => l.startsWith("worktree "))?.slice(9);

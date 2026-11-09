@@ -28,11 +28,15 @@ export async function lookup(cwd, machine, branch) {
   return { repo, pr, issue };
 }
 
+// GitHub over HTTPS with gh's token, so an SSH origin never asks the SSH agent to sign: only here, as another machine
+// may have no gh.
+const overHttps = (on) => on ? [] : ["-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "url.https://github.com/.insteadOf=ssh://git@github.com/", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
+
 // How far origin's default branch has moved on since the branch checked out at cwd left it, fetched fresh
 // without prompting: { base: "main", behind }, { base, failed: true } when origin can't be reached, or null (no origin,
 // it is the default branch).
 export async function staleness(cwd, machine, branch) {
-  const git = (args) => exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5", "git", ...args], { cwd, on: machine });
+  const git = (args) => exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5", "git", ...overHttps(machine), ...args], { cwd, on: machine });
   // Origin names its default branch itself: the local origin/HEAD keeps what it was at clone, so it only stands in offline.
   const asked = await git(["ls-remote", "--symref", "origin", "HEAD"]);
   const name = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(asked.stdout)?.[1];

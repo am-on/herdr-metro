@@ -95,6 +95,10 @@ function quote(rows) {
 }
 const load = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key) ?? "null") ?? fallback; } catch { return fallback; } };
 
+// GitHub over HTTPS with gh's token, so an SSH origin never asks the SSH agent to sign: only here, as another machine
+// may have no gh.
+const overHttps = (on) => on ? [] : ["-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "url.https://github.com/.insteadOf=ssh://git@github.com/", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
+
 export default class Review extends View {
   init(_props, cx) {
     this.mode = props()?.mode ?? load("mode", "uncommitted");
@@ -196,7 +200,7 @@ export default class Review extends View {
   // The default branch origin names now, asked once per checkout: the local origin/HEAD keeps what it was at clone.
   async originDefault(root, on) {
     if (this.defaults[root]) return this.defaults[root];
-    const asked = await exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5", "git", "ls-remote", "--symref", "origin", "HEAD"], { cwd: root, on });
+    const asked = await exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5", "git", ...overHttps(on), "ls-remote", "--symref", "origin", "HEAD"], { cwd: root, on });
     const name = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(asked.stdout)?.[1] ?? null;
     if (name) this.defaults[root] = name;
     return name;

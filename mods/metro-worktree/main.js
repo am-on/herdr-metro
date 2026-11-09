@@ -69,9 +69,13 @@ async function pulls(repo, on) {
   return JSON.parse(r.stdout).map((pr) => ({ ...pr, at: Date.parse(pr.updatedAt) / 1000 || 0 })).sort((a, b) => b.at - a.at);
 }
 
+// GitHub over HTTPS with gh's token, so an SSH origin never asks the SSH agent to sign: only here, as another machine
+// may have no gh.
+const overHttps = (on) => on ? [] : ["-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "url.https://github.com/.insteadOf=ssh://git@github.com/", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
+
 // Updates origin's branches without prompting for credentials.
 async function fetchOrigin(repo, on) {
-  const r = await exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes", "git", "fetch", "--quiet", "--prune", "--no-tags", "origin"], { cwd: repo.main, on });
+  const r = await exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes", "git", ...overHttps(on), "fetch", "--quiet", "--prune", "--no-tags", "origin"], { cwd: repo.main, on });
   if (r.code !== 0) throw new Error((r.stderr || "git fetch failed.").trim().split("\n")[0]);
 }
 
@@ -293,12 +297,12 @@ export default class Worktree extends View {
     const has = async (ref) => (await git(this.repo.main, ["show-ref", "--verify", "--quiet", ref], this.on)).ok;
     // A pull request from a fork is GitHub's pull/<n>/head, kept here as pr/<n>.
     if (this.pr && !(await has(`refs/heads/${branch}`))) {
-      const f = await git(this.repo.main, ["fetch", "--quiet", "origin", `pull/${this.pr.number}/head:refs/heads/${branch}`], this.on);
+      const f = await git(this.repo.main, [...overHttps(this.on), "fetch", "--quiet", "origin", `pull/${this.pr.number}/head:refs/heads/${branch}`], this.on);
       if (!f.ok) return f.err || `Couldn't fetch pull request #${this.pr.number}.`;
     }
     const exists = await has(`refs/heads/${branch}`);
     // A branch only on origin (a teammate's PR) is fetched and checked out tracking it.
-    if (!exists) await git(this.repo.main, ["fetch", "--quiet", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], this.on);
+    if (!exists) await git(this.repo.main, [...overHttps(this.on), "fetch", "--quiet", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], this.on);
     const remote = !exists && await has(`refs/remotes/origin/${branch}`);
     const add = exists ? ["worktree", "add", path, branch]
       : remote ? ["worktree", "add", "--track", "-b", branch, path, `origin/${branch}`]
