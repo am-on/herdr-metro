@@ -254,7 +254,13 @@ export default class Review extends View {
           const path = fields[i + 1];
           if (path) files.push({ path, status: fields[i][0], ...(stat[path] ?? { add: 0, del: 0 }) });
         }
-        for (const path of untracked.stdout.split("\0").filter(Boolean)) files.push({ path, status: "A", fresh: true, add: 0, del: 0 });
+        // Every line of an untracked file is added; grep -I counts a binary one as none.
+        const fresh = untracked.stdout.split("\0").filter(Boolean), lines = {};
+        if (fresh.length) {
+          const r = await exec("sh", ["-c", "git ls-files -z -o --exclude-standard | xargs -0 grep -cHI ''"], { cwd: root, on });
+          for (const l of r.stdout.split("\n")) { const i = l.lastIndexOf(":"); if (i > 0) lines[l.slice(0, i)] = parseInt(l.slice(i + 1), 10) || 0; }
+        }
+        for (const path of fresh) files.push({ path, status: "A", fresh: true, add: lines[path] ?? 0, del: 0 });
         files.sort((a, b) => a.path.localeCompare(b.path));
         if (mode !== this.mode) return;
         if (mode === "uncommitted") { empty = !files.length; if (files.length) this.keepUncommitted = false; }
@@ -565,7 +571,8 @@ export default class Review extends View {
     const viewedCount = this.files.filter((f) => this.isViewed(f)).length;
     const openFile = this.files.find((f) => f.path === this.open);
     const tab = this.tab ??= this.claimTab();
-    if (tab) this.publish(tab, { mode: this.mode, base: this.baseName ?? null, last: this.lastCommit ?? null, listWidth: this.listWidth });
+    if (tab) this.publish(tab, { mode: this.mode, base: this.baseName ?? null, last: this.lastCommit ?? null, listWidth: this.listWidth,
+      files: this.files.length, add, del, loading: Boolean(this.loading) });
 
     // The switch sits in the pane header, over the file list; without a known tab the review draws it there itself.
     const modeSwitch = tab ? null : h_flex().h(40).flex_none().px(8).items_center().child(h_flex().w_full().h(26).p(2).gap(2).rounded(6)
@@ -622,10 +629,10 @@ export default class Review extends View {
     const footer = v_flex().flex_none().border_t(1).border_color(t.border)
       .when(Boolean(this.note), (e) => e.child(div().px(14).pt(8).text_size(12).text_color(t.ansi1).child(this.note)))
       .child(h_flex().h(48).px(14).gap(10).items_center().text_size(12)
-        .child(div().flex_none().text_color(t.dim).child(`${this.files.length} file${this.files.length === 1 ? "" : "s"}`))
-        .when(this.files.length > 0, (e) => e.child(div().flex_none().text_color(viewedCount === this.files.length ? t.ansi2 : t.dim).child(`${viewedCount} viewed`)))
-        .child(div().flex_none().text_color(t.ansi2).child(`+${add}`))
-        .child(div().flex_none().text_color(t.ansi1).child(`−${del}`))
+        // The pane header shows the files and lines; without a known tab, the footer does.
+        .when(!tab, (e) => e.child(div().flex_none().text_color(t.dim).child(`${this.files.length} file${this.files.length === 1 ? "" : "s"}`)))
+        .when(this.files.length > 0, (e) => e.child(div().flex_none().text_color(viewedCount === this.files.length ? t.ansi2 : t.dim).child(`${viewedCount} of ${this.files.length} viewed`)))
+        .when(!tab, (e) => e.child(div().flex_none().text_color(t.ansi2).child(`+${add}`)).child(div().flex_none().text_color(t.ansi1).child(`−${del}`)))
         .when(this.loading, (e) => e.child(svg("mods/metro-chrome/icons/spinner.svg").size(12).flex_none().text_color(t.dim).spin(900)))
         .child(div().flex_1().min_w(0))
         .when(!mine.length, (e) => e.child(div().flex_none().text_color(t.dim).child("Click a line or a hunk to comment on it")))

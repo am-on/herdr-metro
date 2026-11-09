@@ -10,6 +10,8 @@ import { h_flex } from "gpui-base";
 import { panes, terminals, props, run, hc, theme, home, spaces, shared } from "herdr";
 import { namer } from "./name.js";
 
+const thousands = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
 // Mod panes have no program; these ones get an icon of their own.
 const MOD_PROGRAMS = { "metro-review": { name: "Review", icon: "mods/metro-chrome/icons/git-compare.svg", tint: true } };
 
@@ -92,13 +94,30 @@ export default class Pane extends View {
             .on_click((_e, cx) => { cx.stop_propagation(); run(`metro-review.${id}`); })
             .child(div().min_w(0).truncate().child(label));
         })),
+      r.files > 0 && this.diffstat(t, r),
       div().flex_1(),
       div().id(`ph-refresh-${p.pane}`).h(22).px(8).flex().flex_none().items_center().rounded(6).text_size(12).text_color(t.muted).cursor_pointer()
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_mouse_down("left", stop)
         .on_click((_e, cx) => { cx.stop_propagation(); run("metro-review.refresh"); })
         .child("Refresh"),
-    ];
+    ].filter(Boolean);
+  }
+
+  // GitHub's diffstat: the files, the added and deleted lines, and five squares split between them.
+  diffstat(t, r) {
+    const total = r.add + r.del;
+    const green = total ? Math.round((5 * r.add) / total) : 0, red = total ? 5 - green : 0;
+    const square = (c) => div().size(8).flex_none().rounded(2).bg(c);
+    return h_flex().flex_none().gap(8).items_center().text_size(12)
+      .child(div().flex_none().text_color(t.muted).child(`${r.files} file${r.files === 1 ? "" : "s"}`))
+      .child(div().flex_none().text_color(t.ansi2).child(`+${thousands(r.add)}`))
+      .child(div().flex_none().text_color(t.ansi1).child(`−${thousands(r.del)}`))
+      .child(h_flex().flex_none().gap(2).children([
+        ...Array.from({ length: green }, () => square(t.ansi2)),
+        ...Array.from({ length: red }, () => square(t.ansi1)),
+        ...Array.from({ length: 5 - green - red }, () => square(t.border)),
+      ]));
   }
 
   // The folder and branch a lone pane runs in, each after its icon, the folder giving way first.
