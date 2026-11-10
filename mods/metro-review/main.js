@@ -1,8 +1,8 @@
 // A full-tab diff review: uncommitted changes, the last commit or the whole branch, comments on lines, sent to an agent.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, TextareaState, Textarea } from "gpui-base";
 import { namer } from "./name.js";
-import { spaces, panes, agents, focused, props, shared, setShared, nextCommand, knownAgents, run, exec, hc, readTextFile, watchFolder, theme, settings, notify } from "herdr";
+import { spaces, panes, agents, focused, props, shared, setShared, nextCommand, knownAgents, run, exec, hc, readTextFile, watchFolder, theme, settings, notify, openOverlay, closeOverlay } from "herdr";
 
 // Reads write nothing under .git, so the folder watch doesn't wake on its own refresh.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -58,6 +58,8 @@ const COLORS = {
   dark: { "+": ["#2ea04326", "#3fb9504d", "#2ea04366"], "-": ["#f851491a", "#f851494d", "#f8514966"], "@": ["#388bfd1a", "#388bfd66"] },
 };
 const NUM = 52;
+// Where a diff line's code starts: its 2px edge, both numbers and the sign; comments line up with it.
+const CODE_X = 2 + NUM * 2 + 24;
 
 // The folder this review looks at: the one it was opened in, else its own space's first terminal's.
 function where(tab = localStorage.getItem("tab")) {
@@ -74,6 +76,8 @@ function where(tab = localStorage.getItem("tab")) {
 const DRAFTS = "metro-review.drafts";
 const NONE = "#00000000";
 const QUOTED = 60;
+const CARD = 560; // a comment card's width, written or posted
+const TEXTAREA_GUTTER = 12; // what a textarea keeps free at its right, so posted text wraps where it was typed
 // A line is found again by its side, number and text, so a comment never lands on a line that moved under it.
 const anchor = (row) => ({ side: row.side, number: row.number, kind: row.kind, text: row.text });
 const anchorKey = (a) => `${a.side}\u0000${a.number}\u0000${a.text}`;
@@ -99,8 +103,83 @@ const load = (key, fallback) => { try { return JSON.parse(localStorage.getItem(k
 // may have no gh.
 const overHttps = (on) => on ? [] : ["-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "url.https://github.com/.insteadOf=ssh://git@github.com/", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
 
+// owner/repo from an origin URL in https, ssh or scp form.
+function repoOf(url) {
+  const m = /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(url.trim());
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+// The file on GitHub: on the branch checked out when origin has the file there, else on origin's default branch.
+async function githubFile({ root, on, path, base }) {
+  const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
+  const remote = await git(["remote", "get-url", "origin"]);
+  const repo = remote.code === 0 ? repoOf(remote.stdout) : null;
+  if (!repo) return { why: "No GitHub origin" };
+  const branch = (await git(["branch", "--show-current"])).stdout.trim();
+  const head = await git(["rev-parse", "--abbrev-ref", "origin/HEAD"]);
+  const refs = [branch && `origin/${branch}`, base && `origin/${base}`, head.code === 0 ? head.stdout.trim() : null, "origin/main", "origin/master"];
+  for (const ref of [...new Set(refs.filter((r) => r?.startsWith("origin/")))]) {
+    if ((await git(["cat-file", "-e", `${ref}:${path}`])).code !== 0) continue;
+    const name = ref.slice("origin/".length), enc = (x) => x.split("/").map(encodeURIComponent).join("/");
+    return { url: `https://github.com/${repo}/blob/${enc(name)}/${enc(path)}`, branch: name };
+  }
+  return { why: "Not on GitHub yet" };
+}
+
+// A file's right-click menu: Copy path (absolute), Open on GitHub.
+class FileMenu {
+  constructor(menu, cx) {
+    this.menu = menu; this.at = 0; this.github = null;
+    this.handle = cx.focus_handle(); this.handle.focus();
+    cx.spawn(async (cx) => {
+      try { this.github = await githubFile(menu); } catch { this.github = { why: "Couldn't ask git" }; }
+      cx.notify();
+    });
+  }
+
+  items() {
+    const g = this.github;
+    return [
+      { key: "copy", label: "Copy path", icon: "mods/metro-chrome/icons/copy.svg", note: "1", ready: true },
+      { key: "github", label: "Open on GitHub", icon: "mods/metro-chrome/icons/github.svg", note: g ? g.branch ?? g.why : "…", ready: Boolean(g?.url) },
+    ];
+  }
+
+  choose(item, cx) {
+    if (!item.ready) return;
+    if (item.key === "copy") cx.write_to_clipboard(`${this.menu.root}/${this.menu.path}`);
+    else exec("open", [this.github.url]).catch(() => {});
+    closeOverlay(props().overlay);
+  }
+
+  key(e, cx) {
+    const list = this.items(), n = list.length;
+    if (e.key === "escape") return closeOverlay(props().overlay);
+    if (e.key === "enter") return this.choose(list[this.at], cx);
+    if (e.key === "down") this.at = (this.at + 1) % n;
+    else if (e.key === "up") this.at = (this.at + n - 1) % n;
+    else if (/^[1-9]$/.test(e.key) && Number(e.key) <= n) return this.choose(list[Number(e.key) - 1], cx);
+    cx.notify();
+  }
+
+  render(t) {
+    return v_flex().id("file-menu").size_full().p(6).gap(2).text_size(13).text_color(t.foreground)
+      .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+      .children(this.items().map((item, i) => h_flex().id(`menu-${item.key}`).h(32).px(8).gap(10).items_center().rounded(6).flex_none()
+        .when(this.at === i, (el) => el.bg(t.selected))
+        .on_hover((over, cx) => { if (over && this.at !== i) { this.at = i; cx.notify(); } })
+        .on_click((_e, cx) => this.choose(item, cx))
+        .when(item.key === "github" && Boolean(this.github?.url), (el) => el.tooltip(`The file on ${this.github.branch}`))
+        .child(h_flex().size(18).flex_none().items_center().justify_center().child(svg(item.icon).size(14).text_color(item.ready ? t.foreground : t.dim)))
+        .child(div().flex_1().min_w(0).truncate().text_color(item.ready ? t.foreground : t.dim).child(item.label))
+        .child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(item.key === "github" ? item.note : String(i + 1)))));
+  }
+}
+
 export default class Review extends View {
   init(_props, cx) {
+    // Opened with `props().menu` this copy is a file's right-click menu instead.
+    if (props()?.menu) { this.fileMenu = new FileMenu(props().menu, cx); return; }
     this.mode = props()?.mode ?? load("mode", "uncommitted");
     localStorage.removeItem("comments");
     this.viewed = load("viewed", {}); // root, mode and path -> the file's +/- counts when marked viewed
@@ -108,8 +187,11 @@ export default class Review extends View {
     this.drag = null; // { x, width } while the file list's edge is dragged
     this.files = []; this.rows = []; this.open = null;
     this.editing = null; // { id?, path, from, to, lines, quote } while a comment is written or edited
-    this.input = InputState.new({ placeholder: "Leave a comment" });
-    this.input.on("submit", (_e, cx) => this.addComment(cx));
+    this.input = TextareaState.new({ placeholder: "Leave a comment" });
+    this.input.set_soft_wrap(true);
+    this.input.set_auto_grow(1, 10);
+    // Enter adds the comment; Shift-Enter starts a new line.
+    this.input.on("submit", (e, cx) => { if (!e.shift) this.addComment(cx); });
     this.handle = cx.focus_handle();
     this.known = {};
     this.defaults = {}; // checkout root -> origin's default branch
@@ -516,37 +598,46 @@ export default class Review extends View {
     return base.flex().flex_wrap().children(pieces.map(([word, changed]) => div().flex_none().when(changed, (e) => e.bg(mark)).child(word)));
   }
 
-  // A comment under its lines: click it to edit, × to delete. A range or a lost one names its lines.
-  commentRow({ c, lost }, t) {
-    const at = this.span(c), lines = at ? linesLabel(this.rows.slice(at.from, at.to + 1)) : c.lines;
+  // What a comment's card says above its text: the lines of a range, or that its lines left the diff.
+  caption(e, lost) {
+    const at = this.span(e), lines = at ? linesLabel(this.rows.slice(at.from, at.to + 1)) : e.lines;
     const cap = `${lines[0].toUpperCase()}${lines.slice(1)}`;
-    const caption = lost ? `${cap} ${/^(removed )?line /.test(lines) ? "isn't" : "aren't"} in the diff any more` : at && at.from !== at.to ? cap : null;
-    return h_flex().id(`comment-${c.id}`).w_full().pl(64).pr(16).py(4)
-      .child(h_flex().id(`comment-card-${c.id}`).max_w(760).min_w(0).px(10).py(6).gap(8).items_start().rounded(6).bg(t.surface).border(1).border_color(t.border)
-        .font_family(settings().ui_font ?? "Geist").text_size(12).cursor_pointer().hover((s) => s.bg(t.hover))
-        .tooltip("Click to edit").on_click((_e, cx) => this.editComment(c, cx))
-        .child(div().flex_1().min_w(0).text_color(t.foreground)
-          .when(Boolean(caption), (el) => el.child(div().text_size(11).text_color(t.dim).child(caption)))
-          .child(c.body))
-        .child(div().id(`remove-${c.id}`).flex_none().pt(2).text_color(t.dim).hover((s) => s.text_color(t.foreground)).cursor_pointer()
-          .role("button").accessibility_label("Delete comment").tooltip("Delete comment")
-          .on_click((_e, cx) => { cx.stop_propagation(); this.removeComment(c.id, cx); })
-          .child(svg("mods/metro-chrome/icons/close.svg").size(10))));
+    return { lines: cap, caption: lost ? `${cap} ${/^(removed )?line /.test(lines) ? "isn't" : "aren't"} in the diff any more` : at && at.from !== at.to ? cap : null };
   }
 
-  // The comment being written: the lines it covers, the input, then Cancel (Esc) and Comment or Save (Enter).
+  // The card a comment is shown in and written in, the same size both ways, so its text doesn't move when posted.
+  card(t, id, caption, body) {
+    return v_flex().id(id).w(CARD).min_w(0).px(10).py(6).rounded(6).border(1).text_color(t.foreground)
+      .font_family(settings().ui_font ?? "Geist").text_size(12).line_height("18px")
+      .when(Boolean(caption), (el) => el.child(div().text_size(11).text_color(t.dim).child(caption)))
+      .child(body);
+  }
+
+  // A comment under its lines: click it to edit; the × beside it, outside the card, deletes it. A range or a lost one names its lines.
+  commentRow({ c, lost }, t) {
+    const { caption } = this.caption(c, lost);
+    return h_flex().id(`comment-${c.id}`).w_full().pl(CODE_X).pr(16).py(4).gap(4).items_start()
+      .child(this.card(t, `comment-card-${c.id}`, caption, div().pr(TEXTAREA_GUTTER).child(c.body))
+        .bg(t.surface).border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
+        .tooltip("Click to edit").on_click((_e, cx) => this.editComment(c, cx)))
+      .child(div().id(`remove-${c.id}`).size(24).mt(4).flex_none().flex().items_center().justify_center().rounded(6)
+        .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .role("button").accessibility_label("Delete comment").tooltip("Delete comment")
+        .on_click((_e, cx) => { cx.stop_propagation(); this.removeComment(c.id, cx); })
+        .child(svg("mods/metro-chrome/icons/close.svg").size(12)));
+  }
+
+  // The comment being written, in its card; under it what it covers, then Cancel (Esc) and Comment or Save (Enter).
   editorRow(t, lost) {
-    const e = this.editing, at = this.span(e), label = at ? linesLabel(this.rows.slice(at.from, at.to + 1)) : e.lines;
-    const lines = `${label[0].toUpperCase()}${label.slice(1)}`;
-    const note = lost ? `${lines}: not in the diff any more` : `${lines} · shift-click another line to widen`;
-    return v_flex().id("comment-editor").w_full().pl(64).pr(16).py(6).gap(4)
-      .font_family(settings().ui_font ?? "Geist")
-      .child(div().text_size(11).text_color(t.dim).child(e.id ? `Editing · ${note}` : note))
-      .child(div().w(560).h(32).px(10).flex().items_center().rounded(8).bg(t.background).border(1).border_color(t.accent)
-        .text_size(12)
+    const e = this.editing, { lines, caption } = this.caption(e, lost);
+    const note = `${e.id ? "Editing · " : ""}${lost ? "Not in the diff any more" : `${lines} · shift-click another line to widen`} · shift-↵ for a new line`;
+    return v_flex().id("comment-editor").w_full().pl(CODE_X).pr(16).py(4).gap(6)
+      .child(this.card(t, "comment-editor-card", caption, Textarea.new(this.input).w_full())
+        .bg(t.background).border_color(t.accent)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .child(Input.new(this.input).w_full().h_full()))
-      .child(h_flex().w(560).pt(2).gap(8).justify_end()
+        .on_key_down((e, cx) => { if (e.key === "enter" && !e.modifiers?.shift) { cx.stop_propagation(); this.addComment(cx); } }))
+      .child(h_flex().w(CARD).gap(8).items_center().font_family(settings().ui_font ?? "Geist")
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(note))
         .child(this.editorButton(t, "comment-cancel", "Cancel", "esc", false, (cx) => this.closeEditor(cx)))
         .child(this.editorButton(t, "comment-add", e.id ? "Save" : "Comment", "↵", true, (cx) => this.addComment(cx))));
   }
@@ -565,8 +656,16 @@ export default class Review extends View {
         .text_color(primary ? t.solid_foreground : t.muted).child(key));
   }
 
+  // A file's menu opens at the pointer; the review's default branch, when known, is where GitHub's copy is looked for second.
+  openMenu(f) {
+    if (!this.root) return;
+    openOverlay({ mod: "metro-review", kind: "popup", width: 260, height: 80,
+      props: { menu: { root: this.root, on: this.on ?? null, path: f.path, base: this.defaults[this.root] ?? null } } });
+  }
+
   render(cx) {
     const t = theme();
+    if (this.fileMenu) return this.fileMenu.render(t);
     const items = this.items(), sel = this.span(this.editing);
     const mine = this.mine(), list = this.targets();
     const counts = new Map();
@@ -598,6 +697,7 @@ export default class Review extends View {
         return h_flex().id(`file-${f.path}`).h(28).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
           .when(this.open === f.path, (e) => e.bg(t.selected)).when(this.open !== f.path, (e) => e.hover((s) => s.bg(t.hover)))
           .on_click((_e, cx) => this.pick(f.path, cx))
+          .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(f); })
           .child(div().w(12).flex_none().text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().min_w(0).truncate().text_color(t.dim).child(parts.length ? parts.join("/") + "/" : ""))
             .child(div().flex_none().max_w(Math.max(120, this.listWidth - 110)).truncate().text_color(seen ? t.dim : t.foreground).child(name)))
@@ -609,7 +709,8 @@ export default class Review extends View {
 
     // The open file's path and its Viewed toggle, above its diff.
     const fileHead = openFile ? h_flex().h(36).flex_none().px(14).gap(10).items_center().border_b(1).border_color(t.border)
-      .child(div().min_w(0).truncate().text_color(t.muted).child(openFile.path))
+      .child(div().id("open-path").min_w(0).truncate().text_color(t.muted).child(openFile.path)
+        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(openFile); }))
       .child(div().text_size(12).text_color(t.ansi2).child(`+${openFile.add}`))
       .child(div().text_size(12).text_color(t.ansi1).child(`−${openFile.del}`))
       .child(div().flex_1())
