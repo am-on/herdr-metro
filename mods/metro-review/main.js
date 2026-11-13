@@ -1,6 +1,6 @@
 // A full-tab diff review: uncommitted changes, the last commit or the whole branch, comments on lines, sent to an agent.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea } from "gpui-base";
+import { v_flex, h_flex, TextareaState, Textarea, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { namer } from "./name.js";
 import { spaces, panes, agents, focused, props, shared, setShared, nextCommand, knownAgents, run, exec, hc, readTextFile, watchFolder, theme, settings, notify, openOverlay, closeOverlay } from "herdr";
 
@@ -57,6 +57,57 @@ const COLORS = {
   light: { "+": ["#e6ffec", "#ccffd8", "#abf2bc"], "-": ["#ffebe9", "#ffd7d5", "#ff818266"], "@": ["#ddf4ff", "#b6e3ff"] },
   dark: { "+": ["#2ea04326", "#3fb9504d", "#2ea04366"], "-": ["#f851491a", "#f851494d", "#f8514966"], "@": ["#388bfd1a", "#388bfd66"] },
 };
+// A search match in the code, GitHub's find highlight.
+const FOUND = { light: "#ffd33d99", dark: "#bb800999" };
+// The match next and previous are on.
+const CURRENT = { light: "#fb8f44", dark: "#db6d28" };
+// Lines shown above and below each match in the results, and a file's name row there.
+const CONTEXT = 2;
+const RESULT_HEAD = 40;
+const RESULT_GAP = 12; // the grey between two files' cards
+const RESULT_X = 12; // the grey either side of a card
+const RESULT_END = 10; // the white under a card's last line, its rounded bottom edge included
+
+// Where the needle is in a line, case-insensitive, as [start, end) pairs.
+function findIn(text, needle) {
+  const out = [], hay = text.toLowerCase();
+  if (!needle) return out;
+  for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + needle.length)) out.push([i, i + needle.length]);
+  return out;
+}
+
+// git's C-style quoting of an unusual path in a diff header, undone.
+function unquote(path) {
+  if (!path.startsWith('"')) return path;
+  const bytes = [], body = path.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== "\\") { bytes.push(...new TextEncoder().encode(body[i])); continue; }
+    const c = body[++i];
+    if (/[0-7]/.test(c)) { bytes.push(parseInt(body.slice(i, i + 3), 8)); i += 2; }
+    else bytes.push(({ n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11 })[c] ?? c.charCodeAt(0));
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+// A whole diff split by file: each file's hunks, from its first `@@` on.
+function diffFiles(out) {
+  const files = new Map();
+  let path = null, lines = null, header = false;
+  for (const l of out.split("\n")) {
+    if (l.startsWith("diff --git ")) { header = true; path = null; lines = null; continue; }
+    if (header) {
+      if (l.startsWith("--- a/") || l.startsWith('--- "a/')) path = unquote(l.slice(4)).slice(2);
+      else if (l.startsWith("+++ b/") || l.startsWith('+++ "b/')) path = unquote(l.slice(4)).slice(2);
+      else if (l.startsWith("@@")) { header = false; if (path !== null) files.set(path, lines = [l]); }
+      continue;
+    }
+    if (lines && (l[0] === "+" || l[0] === "-" || l[0] === " " || l.startsWith("@@"))) lines.push(l);
+  }
+  return files;
+}
+
+// A diff's lines as the review shows them: the first MAX_LINES, each cut at 2,000 characters.
+const cut = (lines) => lines.slice(0, MAX_LINES).map((l) => (l.length > 2000 ? l.slice(0, 2000) + "…" : l));
 const NUM = 52;
 // Where a diff line's code starts: its 2px edge, both numbers and the sign; comments line up with it.
 const CODE_X = 2 + NUM * 2 + 24;
@@ -193,6 +244,16 @@ export default class Review extends View {
     // Enter adds the comment; Shift-Enter starts a new line.
     this.input.on("submit", (e, cx) => { if (!e.shift) this.addComment(cx); });
     this.handle = cx.focus_handle();
+    // The search over the whole diff: what's typed, and every changed file's lines to look in.
+    this.query = "";
+    this.corpus = null; // path -> the diff's rows, for the diff last read
+    this.showResults = true; // while searching: every match in one list, else the open file
+    this.current = 0; // the match next and previous move from
+    this.resultsScroll = VirtualListScrollHandle.new();
+    this.search = InputState.new({ placeholder: "Search the changes" });
+    this.search.on("change", (_e, cx) => this.setQuery(this.search.value(), cx));
+    this.search.on("focus", (_e, cx) => { this.searchFocused = true; cx.notify(); });
+    this.search.on("blur", (_e, cx) => { this.searchFocused = false; cx.notify(); });
     this.known = {};
     this.defaults = {}; // checkout root -> origin's default branch
     cx.spawn(async (cx) => {
@@ -261,7 +322,7 @@ export default class Review extends View {
     if (byHand) this.keepUncommitted = mode === "uncommitted";
     if (mode === this.mode) return;
     this.mode = mode; localStorage.setItem("mode", JSON.stringify(mode));
-    this.files = []; this.open = null; this.rows = []; this.editing = null;
+    this.files = []; this.open = null; this.rows = []; this.editing = null; this.corpus = null;
     this.refresh(cx);
     cx.notify();
   }
@@ -356,6 +417,7 @@ export default class Review extends View {
         if (!this.open && files.length) this.open = files[0].path;
         if (this.open) await this.loadDiff(this.open);
         else this.rows = [];
+        if (this.needle()) this.searchChanges(cx);
       } catch (e) {
         this.error = `Couldn't read the changes: ${String(e.message ?? e).split("\n")[0]}`;
       } finally {
@@ -388,8 +450,7 @@ export default class Review extends View {
     }
     if (this.open !== path) return;
     this.truncated = lines.length > MAX_LINES;
-    lines = lines.slice(0, MAX_LINES).map((l) => (l.length > 2000 ? l.slice(0, 2000) + "…" : l));
-    this.rows = diffRows(lines);
+    this.rows = diffRows(cut(lines));
   }
 
   pick(path, cx) {
@@ -400,6 +461,147 @@ export default class Review extends View {
       cx.notify();
     });
     cx.notify();
+  }
+
+  // What the search looks for, lowercased; "" when nothing but spaces is typed.
+  needle() { return this.query.trim() ? this.query.toLowerCase() : ""; }
+
+  setQuery(text, cx) {
+    if (text === this.query) return;
+    this.query = text;
+    this.showResults = true; this.current = 0;
+    if (this.needle()) { if (this.corpus) this.followMatches(cx); else this.searchChanges(cx); }
+    cx.notify();
+  }
+
+  clearSearch(cx) {
+    this.search.set_value("");
+    this.setQuery("", cx);
+  }
+
+  // Reads the whole diff, and untracked files whole, for the search; a refresh while it reads reads again after.
+  searchChanges(cx) {
+    if (!this.root) return;
+    if (this.searching) { this.searchAgain = true; return; }
+    this.searching = true; this.searchAgain = false;
+    const { root, on, ref, mode } = this, files = this.files;
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("git", [...READ, "-c", "core.quotePath=false", "diff", ref, "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/"], { cwd: root, on });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+        const corpus = new Map();
+        for (const [path, lines] of diffFiles(r.stdout)) corpus.set(path, diffRows(cut(lines)));
+        for (const f of files.filter((f) => f.fresh)) {
+          const text = await readTextFile(`${root}/${f.path}`, { on }).catch(() => null);
+          if (text === null || text.includes("\0")) continue;
+          const body = text.replace(/\n$/, "").split("\n");
+          corpus.set(f.path, diffRows(cut([`@@ -0,0 +1,${body.length} @@`, ...body.map((l) => `+${l}`)])));
+        }
+        if (root !== this.root || mode !== this.mode) return;
+        this.corpus = corpus; this.searchError = null;
+        this.followMatches(cx);
+      } catch (e) {
+        this.searchError = `Couldn't search the changes: ${String(e.message ?? e).split("\n")[0]}. Press Refresh to try again.`;
+      } finally {
+        this.searching = false;
+        if (this.searchAgain && this.needle()) this.searchChanges(cx);
+        cx.notify();
+      }
+    });
+    cx.notify();
+  }
+
+  // How many times each file's diff has the search in it, for files that have it.
+  matchCounts() {
+    const needle = this.needle();
+    if (!needle || !this.corpus) return null;
+    if (this.counted?.corpus === this.corpus && this.counted.needle === needle) return this.counted.counts;
+    const counts = new Map();
+    for (const [path, rows] of this.corpus) {
+      let n = 0;
+      for (const r of rows) if (r.side) n += findIn(r.text, needle).length;
+      if (n) counts.set(path, n);
+    }
+    this.counted = { corpus: this.corpus, needle, counts };
+    return counts;
+  }
+
+  // While searching, the open file is one with a match: the first in the list when the open one has none.
+  followMatches(cx) {
+    const counts = this.matchCounts();
+    if (!counts || counts.has(this.open)) return;
+    const first = this.files.find((f) => counts.has(f.path));
+    if (first) this.pick(first.path, cx);
+  }
+
+  // Every match in one list, as Zed's project search shows them: each file's name, then the lines around each of its
+  // matches, a gap row where lines are skipped. `matches` is every match in order: its item and which one in its line.
+  results() {
+    const needle = this.needle();
+    if (!needle || !this.corpus) return null;
+    const r = this.memo;
+    if (r?.corpus === this.corpus && r.needle === needle && r.files === this.files) return r;
+    const items = [], matches = [];
+    for (const f of this.files) {
+      const rows = this.corpus.get(f.path);
+      if (!rows) continue;
+      const hits = new Map();
+      rows.forEach((row, i) => { const n = row.side ? findIn(row.text, needle).length : 0; if (n) hits.set(i, n); });
+      if (!hits.size) continue;
+      items.push({ type: "space", key: `s\u0000${f.path}`, path: f.path });
+      items.push({ type: "file", key: `f\u0000${f.path}`, path: f.path, count: [...hits.values()].reduce((a, b) => a + b, 0) });
+      let last = -1;
+      for (const h of hits.keys()) {
+        if (h <= last) continue;
+        let from = h, to = h;
+        for (let k = 0; k < CONTEXT && from > 0 && rows[from - 1].side; k++) from--;
+        for (let k = 0; k < CONTEXT && to + 1 < rows.length && rows[to + 1].side; k++) to++;
+        from = Math.max(from, last + 1);
+        if (last >= 0 && from > last + 1) items.push({ type: "gap", key: `g\u0000${f.path}\u0000${from}`, path: f.path });
+        for (let i = from; i <= to; i++) {
+          for (let k = 0; k < (hits.get(i) ?? 0); k++) matches.push({ at: items.length, occ: k });
+          items.push({ type: "row", key: `r\u0000${f.path}\u0000${i}`, path: f.path, i, row: rows[i] });
+        }
+        last = to;
+      }
+      items.push({ type: "end", key: `e\u0000${f.path}`, path: f.path });
+    }
+    if (items.length) items.push({ type: "space", key: "s\u0000end" });
+    this.memo = { corpus: this.corpus, needle, files: this.files, items, matches };
+    return this.memo;
+  }
+
+  // Next and previous go through every match, wrapping; the list shows the results and scrolls the match to its middle.
+  step(by, cx) {
+    const r = this.results();
+    if (!r?.matches.length) return;
+    const n = r.matches.length;
+    this.current = this.showResults ? (Math.min(this.current, n - 1) + by + n) % n : Math.min(this.current, n - 1);
+    this.showResults = true;
+    this.resultsScroll.scroll_to_item(r.matches[this.current].at, "center");
+    cx.notify();
+  }
+
+  // A file opened while searching starts at its first match.
+  jumpToFirst(path) {
+    const rows = this.needle() ? this.corpus?.get(path) : null;
+    const i = rows ? rows.findIndex((r) => r.side && r.text.toLowerCase().includes(this.needle())) : -1;
+    this.jump = i >= 0 ? { path, i, text: rows[i].text } : null;
+    this.jumps = (this.jumps ?? 0) + 1;
+  }
+
+  // A click on a result opens its file, still searched: only the hunks with a match show.
+  openResult(key, cx) {
+    const r = this.results(), at = r?.items.findIndex((x) => x.key === key) ?? -1;
+    if (at < 0) return;
+    const k = r.matches.findIndex((m) => m.at >= at);
+    if (k >= 0) this.current = k;
+    const it = r.items[at], hit = it.type === "row" ? it : r.items[r.matches[k]?.at];
+    this.jump = hit?.row ? { path: it.path, i: hit.i, text: hit.row.text } : null;
+    this.jumps = (this.jumps ?? 0) + 1;
+    this.showResults = false;
+    if (this.open === r.items[at].path) cx.notify();
+    else this.pick(r.items[at].path, cx);
   }
 
   // Where an anchor is in the open diff: its exact line, else the one line on its side with its text, else -1.
@@ -558,10 +760,49 @@ export default class Review extends View {
     const place = (i, item) => (i < 0 ? lost.push({ ...item, lost: true }) : under.set(i, [...(under.get(i) ?? []), item]));
     for (const c of this.mine().filter((c) => c.path === this.open)) if (c.id !== e?.id) place(this.at(c.to), { type: "comment", c });
     if (e) place(this.at(e.to), { type: "editor" });
+    const editorAt = e ? this.at(e.to) : -1, shown = this.shownRows(editorAt);
+    // Opened from the search, the file starts two lines above its match; what's above folds into one row that opens it.
+    let start = 0;
+    const j = this.jump;
+    if (shown && j?.path === this.open) {
+      const at = this.rows[j.i]?.side && this.rows[j.i].text === j.text ? j.i : this.rows.findIndex((r) => r.side && r.text === j.text);
+      if (at >= 0) { start = at; for (let k = 0; k < CONTEXT && start > 0 && this.rows[start - 1].side; k++) start--; }
+      if (editorAt >= 0 && editorAt < start) start = 0;
+    }
     const out = [];
-    this.rows.forEach((row, i) => { out.push({ type: "row", row, i }); out.push(...(under.get(i) ?? [])); });
+    let above = 0;
+    this.rows.forEach((row, i) => {
+      if (shown && !shown.has(i)) return;
+      if (i < start) { if (row.side) above++; return; }
+      out.push({ type: "row", row, i }); out.push(...(under.get(i) ?? []));
+    });
     // Comments whose lines are gone from the diff now (the code changed) stay visible at the top.
-    return [...lost, ...out];
+    return [...lost, ...(above ? [{ type: "above", n: above }] : []), ...out];
+  }
+
+  // While searching, the rows of the hunks with a match, and of the hunk the comment being written is in; null shows every row.
+  shownRows(editorAt) {
+    const needle = this.needle();
+    if (!needle) return null;
+    const rows = this.rows, shown = new Set();
+    for (let start = 0; start < rows.length;) {
+      let end = start + 1; while (end < rows.length && rows[end].kind !== "@") end++;
+      let keep = editorAt >= start && editorAt < end;
+      for (let i = start; i < end && !keep; i++) keep = Boolean(rows[i].side) && rows[i].text.toLowerCase().includes(needle);
+      if (keep) for (let i = start; i < end; i++) shown.add(i);
+      start = end;
+    }
+    return shown;
+  }
+
+  // The lines above where the search opened the file, folded; a click shows them.
+  aboveRow(n, t) {
+    return h_flex().id("lines-above").w_full().h(28).pl(NUM * 2 + 12).gap(8).items_center().bg(t.chrome).border_b(1).border_color(t.border)
+      .cursor_pointer().text_color(t.muted).font_family(settings().ui_font ?? "Geist").text_size(12)
+      .hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => { this.jump = null; cx.notify(); })
+      .child(svg("mods/metro-chrome/icons/chevron-up.svg").size(13))
+      .child(`Show ${n} line${n === 1 ? "" : "s"} above`);
   }
 
   // Laid out as GitHub's unified diff: old and new numbers in a tinted gutter, the sign, then the code.
@@ -588,14 +829,54 @@ export default class Review extends View {
       .child(this.code(row, c?.[2]));
   }
 
-  // The code, with the changed middle of a paired line highlighted; split at spaces so it still wraps.
-  code(row, mark) {
+  // The code, with the changed middle of a paired line and the search's matches highlighted; split at spaces so it still wraps.
+  code(row, mark, line = false, current = -1) {
     const text = row.text, base = div().flex_1().min_w(0).pr(12).line_height(`${ROW}px`);
-    if (!row.mark || !mark) return base.child(text);
-    const [from, to] = row.mark;
-    const pieces = [[text.slice(0, from), false], [text.slice(from, to), true], [text.slice(to), false]]
-      .flatMap(([part, changed]) => part.split(/(\s+)/).filter(Boolean).map((word) => [word, changed]));
-    return base.flex().flex_wrap().children(pieces.map(([word, changed]) => div().flex_none().when(changed, (e) => e.bg(mark)).child(word)));
+    const changed = row.mark && mark ? row.mark : null, hits = findIn(text, this.needle());
+    if (!changed && !hits.length) return line ? base.truncate().child(text) : base.child(text);
+    const cuts = [...new Set([0, text.length, ...(changed ?? []), ...hits.flat()])].sort((a, b) => a - b);
+    const pieces = [], look = settings().dark ? "dark" : "light";
+    for (let k = 0; k + 1 < cuts.length; k++) {
+      const a = cuts[k], b = cuts[k + 1], hit = hits.findIndex(([x, y]) => a >= x && b <= y);
+      const bg = hit >= 0 ? (hit === current ? CURRENT : FOUND)[look] : changed && a >= changed[0] && b <= changed[1] ? mark : null;
+      for (const word of text.slice(a, b).split(/(\s+)/).filter(Boolean)) pieces.push([word, bg]);
+    }
+    // One line: a result row is 20px high and cut at the right.
+    return (line ? base.flex().overflow_hidden() : base.flex().flex_wrap())
+      .children(pieces.map(([word, bg]) => div().flex_none().when(Boolean(bg), (e) => e.bg(bg)).child(word)));
+  }
+
+  // A row of the results: a file's name and match count, a gap where lines are skipped, or a diff line on one line.
+  // Drawn inside a virtual list, so it has no handlers: the list's on_item_click takes the clicks.
+  resultRow(it, t, current) {
+    // Each file is a white card on the sidebar's grey, as the sidebar's shown agent is: a 1px border, rounded corners, its
+    // name in bold on top, over a line. A list row is drawn alone, so each one draws its slice of the card's sides.
+    if (it.type === "space") return div().w_full().h(RESULT_GAP).bg(t.chrome);
+    const slice = (el, top = false, end = false) => div().w_full().h(it.type === "file" ? RESULT_HEAD : end ? RESULT_END : ROW).px(RESULT_X).bg(t.chrome)
+      .child(div().size_full().overflow_hidden().bg(t.background).border_color(t.border).border_l(1).border_r(1)
+        .when(top, (e) => e.border_t(1).rounded_t(6)).when(end, (e) => e.border_b(1).rounded_b(6))
+        .when(Boolean(el), (e) => e.child(el)));
+    if (it.type === "end") return slice(null, false, true);
+    if (it.type === "file") {
+      const parts = it.path.split("/"), name = parts.pop();
+      return slice(h_flex().size_full().px(14).gap(8).items_center().border_b(1).border_color(t.border).bg(t.background)
+        .cursor_pointer().font_family(settings().ui_font ?? "Geist").text_size(13)
+        .child(svg("mods/metro-chrome/icons/file.svg").size(14).flex_none().text_color(t.muted))
+        .child(div().min_w(0).truncate().text_color(t.muted).child(parts.length ? parts.join("/") + "/" : ""))
+        .child(div().flex_none().font_family(".SystemUIFont").font_weight(700).text_color(t.foreground).child(name))
+        .child(div().flex_1())
+        .child(div().flex_none().h(20).px(7).flex().items_center().rounded(10).border(1).border_color(t.border).bg(t.background)
+          .text_size(11).text_color(t.muted).child(`${it.count} match${it.count === 1 ? "" : "es"}`)), true);
+    }
+    if (it.type === "gap") return slice(h_flex().w_full().h(ROW).pl(NUM * 2 + 12).items_center().text_color(t.dim).child("⋯"));
+    const row = it.row, c = COLORS[settings().dark ? "dark" : "light"][row.kind];
+    const num = (n) => div().w(NUM).h(ROW).flex_none().px(10).flex().items_center().justify_end()
+      .text_color(c ? t.foreground : t.dim).child(n === null ? "" : String(n));
+    return slice(h_flex().w_full().h(ROW).items_stretch().cursor_pointer().border_l(2).border_color(current >= 0 ? t.accent : NONE)
+      .when(Boolean(c), (e) => e.bg(c[0]))
+      .child(h_flex().flex_none().when(Boolean(c), (e) => e.bg(c[1])).child(num(row.old)).child(num(row.new)))
+      .child(div().w(24).h(ROW).flex_none().flex().items_center().justify_center().child(row.kind === " " ? "" : row.kind))
+      .child(this.code(row, c?.[2], true, current)));
   }
 
   // What a comment's card says above its text: the lines of a range, or that its lines left the diff.
@@ -672,7 +953,9 @@ export default class Review extends View {
     for (const c of mine) counts.set(c.path, (counts.get(c.path) ?? 0) + 1);
     const add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const viewedCount = this.files.filter((f) => this.isViewed(f)).length;
-    const openFile = this.files.find((f) => f.path === this.open);
+    // While a search finds nothing in the open file, no file is open.
+    const searched = this.matchCounts();
+    const openFile = this.files.find((f) => f.path === this.open && (!searched || searched.has(f.path)));
     const tab = this.tab ??= this.claimTab();
     if (tab) this.publish(tab, { mode: this.mode, base: this.baseName ?? null, last: this.lastCommit ?? null, listWidth: this.listWidth,
       files: this.files.length, add, del, loading: Boolean(this.loading) });
@@ -691,21 +974,58 @@ export default class Review extends View {
           .child(div().min_w(0).truncate().child(m.label));
       })));
 
-    const fileList = v_flex().id("review-files").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(1)
-      .children(this.files.map((f) => {
-        const parts = f.path.split("/"), name = parts.pop(), n = counts.get(f.path), seen = this.isViewed(f);
+    // The search over the whole diff; while it reads, its icon spins, and Esc or the × clears it.
+    const needle = this.needle(), found = this.matchCounts();
+    const results = this.results(), any = Boolean(results?.matches.length);
+    const arrow = (id, label, dir, by) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4)
+      .text_color(any ? t.muted : t.dim + "66").role("button").accessibility_label(label)
+      .when(any, (el) => el.cursor_pointer().tooltip(label).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); this.step(by, cx); }))
+      .child(svg(`mods/metro-chrome/icons/chevron-${dir}.svg`).size(13));
+    const searchBox = h_flex().h(40).flex_none().px(8).items_center().child(
+      h_flex().id("review-search").w_full().h(28).pl(8).pr(2).gap(6).items_center().rounded(6).border(1)
+        .border_color(this.searchFocused ? t.accent : t.input).bg(t.background)
+        .on_key_down((e, cx) => {
+          if (e.key === "escape" && this.query) { cx.stop_propagation(); this.clearSearch(cx); }
+          else if (e.key === "enter" && needle) { cx.stop_propagation(); this.step(e.modifiers?.shift ? -1 : 1, cx); }
+        })
+        .child(svg(this.searching && needle ? "mods/metro-chrome/icons/spinner.svg" : "mods/metro-chrome/icons/search.svg").size(13).flex_none().text_color(t.dim)
+          .when(Boolean(this.searching && needle), (el) => el.spin(900)))
+        .child(Input.new(this.search).flex_1().min_w(0).h_full().items_center().text_size(12).text_color(t.foreground))
+        .when(Boolean(needle && results), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim)
+          .child(results.matches.length ? `${Math.min(this.current, results.matches.length - 1) + 1}/${results.matches.length}` : "0/0")))
+        .child(arrow("search-prev", "Previous match (shift-↵)", "up", -1))
+        .child(arrow("search-next", "Next match (↵)", "down", 1))
+        .child(div().id("search-clear").size(22).flex_none().flex().items_center().justify_center().rounded(4)
+          .when(Boolean(this.query), (el) => el.cursor_pointer().text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .role("button").accessibility_label("Clear search").tooltip("Clear search")
+            .on_click((_e, cx) => { cx.stop_propagation(); this.clearSearch(cx); })
+            .child(svg("mods/metro-chrome/icons/close.svg").size(11)))));
+    const listed = found ? this.files.filter((f) => found.has(f.path)) : needle ? [] : this.files;
+    const emptyNote = needle
+      ? this.searchError ?? (found ? `Nothing in the changes matches “${this.query.trim()}”.` : "Searching the changes…")
+      : this.error ?? (this.loading ? "Loading changes…" : this.mode === "branch" ? "Nothing on this branch yet." : this.mode === "last" ? "The last commit changed nothing." : "No uncommitted changes.");
+
+    // A list that scrolls beside an always-visible 10px bar on its right edge, as the sidebar's lists do.
+    const scrolled = (id, content) => div().relative().flex_1().min_w(0).min_h(0)
+      .child(v_flex().id(id).size_full().overflow_y_scroll().child(content))
+      .child(div().absolute().top(0).bottom(0).right(0).w(10).child(Scrollbar.vertical(id).size_full().mode("always")));
+    const fileList = scrolled("review-files", v_flex().w_full().flex_none().pl(6).pr(15).py(6).gap(1)
+      .children(listed.map((f) => {
+        const parts = f.path.split("/"), name = parts.pop(), n = counts.get(f.path), seen = this.isViewed(f), hits = found?.get(f.path);
         return h_flex().id(`file-${f.path}`).h(28).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
           .when(this.open === f.path, (e) => e.bg(t.selected)).when(this.open !== f.path, (e) => e.hover((s) => s.bg(t.hover)))
-          .on_click((_e, cx) => this.pick(f.path, cx))
+          .on_click((_e, cx) => { this.showResults = false; this.jumpToFirst(f.path); this.pick(f.path, cx); cx.notify(); })
           .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(f); })
           .child(div().w(12).flex_none().text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().min_w(0).truncate().text_color(t.dim).child(parts.length ? parts.join("/") + "/" : ""))
             .child(div().flex_none().max_w(Math.max(120, this.listWidth - 110)).truncate().text_color(seen ? t.dim : t.foreground).child(name)))
+          .when(Boolean(hits), (e) => e.child(div().id(`hits-${f.path}`).flex_none().text_size(11).text_color(t.muted)
+            .tooltip(`${hits} match${hits === 1 ? "" : "es"}`).child(String(hits))))
           .when(Boolean(n), (e) => e.child(div().h(18).min_w(18).px(5).flex().items_center().justify_center().rounded(9).bg(t.accent).text_size(10).text_color(t.accent_foreground).child(String(n))))
           .child(this.checkbox(`viewed-${f.path}`, seen, t, (cx) => this.toggleViewed(f, cx)));
       }))
-      .when(!this.files.length, (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim)
-        .child(this.error ?? (this.loading ? "Loading changes…" : this.mode === "branch" ? "Nothing on this branch yet." : this.mode === "last" ? "The last commit changed nothing." : "No uncommitted changes."))));
+      .when(!listed.length, (e) => e.child(div().p(8).text_color((needle ? this.searchError : this.error) ? t.ansi1 : t.dim).child(emptyNote))));
 
     // The open file's path and its Viewed toggle, above its diff.
     const fileHead = openFile ? h_flex().h(36).flex_none().px(14).gap(10).items_center().border_b(1).border_color(t.border)
@@ -714,17 +1034,36 @@ export default class Review extends View {
       .child(div().text_size(12).text_color(t.ansi2).child(`+${openFile.add}`))
       .child(div().text_size(12).text_color(t.ansi1).child(`−${openFile.del}`))
       .child(div().flex_1())
+      // While searching, the way back to every match.
+      .when(Boolean(results), (e) => e.child(h_flex().id("back-to-results").h(24).px(8).gap(6).items_center().rounded(6).cursor_pointer()
+        .text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { this.showResults = true; this.step(0, cx); })
+        .child(svg("mods/metro-chrome/icons/search.svg").size(12)).child("All matches")))
       .child(h_flex().id("viewed-toggle").gap(6).items_center().cursor_pointer().text_size(12).text_color(t.muted)
         .on_click((_e, cx) => this.toggleViewed(openFile, cx))
         .child(this.checkbox("viewed-open", this.isViewed(openFile), t, (cx) => this.toggleViewed(openFile, cx)))
         .child("Viewed")) : null;
     // A plain column: comments wrap to their own height under their line.
-    const diffList = v_flex().id("review-diff").flex_1().min_w(0).min_h(0).overflow_y_scrollbar().pb(24)
+    // A new id for each file and each search jump: the column starts at its top, not where the last one was scrolled.
+    const diffList = scrolled(`review-diff-${this.open}-${this.jumps ?? 0}`, v_flex().w_full().flex_none().pr(10).pb(24)
       .font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
-      .children(items.map((it) => (it.type === "row" ? this.diffRow(it.row, it.i, t, sel) : it.type === "editor" ? this.editorRow(t, it.lost) : this.commentRow(it, t))))
+      .children((openFile ? items : []).map((it) => (it.type === "row" ? this.diffRow(it.row, it.i, t, sel) : it.type === "above" ? this.aboveRow(it.n, t) : it.type === "editor" ? this.editorRow(t, it.lost) : this.commentRow(it, t))))
       .when(Boolean(this.truncated), (e) => e.child(div().px(16).py(8).text_size(11).text_color(t.dim)
-        .child(`Showing the first ${MAX_LINES.toLocaleString()} lines of this file.`)));
-    const diff = v_flex().flex_1().min_w(0).min_h(0).when(Boolean(fileHead), (e) => e.child(fileHead)).child(diffList);
+        .child(`Showing the first ${MAX_LINES.toLocaleString()} lines of this file.`))));
+    // While searching, every match in one list, until a result or a file is opened.
+    const hit = results?.matches[Math.min(this.current, results.matches.length - 1)];
+    // The whole panel is the cards' grey, below the last card too.
+    const resultList = results && this.showResults ? h_flex().relative().flex_1().min_w(0).min_h(0).bg(t.chrome)
+      .font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
+      .child(div().flex_1().min_w(0).h_full().child(v_virtual_list("review-results", results.items.length,
+        results.items.map((it) => (it.type === "file" ? RESULT_HEAD : it.type === "space" ? RESULT_GAP : it.type === "end" ? RESULT_END : ROW)), (i) => results.items[i].key,
+        (range) => results.items.slice(range.start, range.end).map((it, k) => this.resultRow(it, t, hit?.at === range.start + k ? hit.occ : -1)))
+        .size_full().track_scroll(this.resultsScroll).on_item_click((key, cx) => this.openResult(key, cx))))
+      .child(div().w(10).h_full().flex_none().relative().child(Scrollbar.vertical("review-results").viewport_from_layout().absolute().inset_0().mode("always")))
+      .when(!results.items.length, (e) => e.child(div().absolute().top(12).left(16).text_color(t.dim).font_family(settings().ui_font ?? "Geist").text_size(13)
+        .child(`Nothing in the changes matches “${this.query.trim()}”.`))) : null;
+    const diff = v_flex().flex_1().min_w(0).min_h(0).when(Boolean(resultList), (e) => e.child(resultList))
+      .when(!resultList, (e) => e.when(Boolean(fileHead), (e) => e.child(fileHead)).child(diffList));
     // Dragging this edge sets the file list's width.
     const edge = div().id("files-edge").w(5).ml(-3).flex_none().cursor_col_resize().hover((s) => s.bg(t.accent + "55"))
       .when(Boolean(this.drag), (e) => e.bg(t.accent + "55"))
@@ -768,6 +1107,8 @@ export default class Review extends View {
       .track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.editing) { cx.stop_propagation(); this.closeEditor(cx); }
+        else if (e.keystroke === "cmd-f") { cx.stop_propagation(); this.search.focus(); }
+        else if (e.keystroke === "cmd-g" || e.keystroke === "cmd-shift-g") { cx.stop_propagation(); this.step(e.modifiers.shift ? -1 : 1, cx); }
       })
       .on_mouse_move((e, cx) => {
         if (!this.drag) return;
@@ -781,7 +1122,7 @@ export default class Review extends View {
       // The file list runs the full height on the left; the diff and its footer share the right.
       .child(h_flex().flex_1().min_h(0).items_stretch()
         .child(v_flex().w(this.listWidth).flex_none().min_h(0).border_r(1).border_color(t.border)
-          .when(Boolean(modeSwitch), (e) => e.child(modeSwitch)).child(fileList))
+          .when(Boolean(modeSwitch), (e) => e.child(modeSwitch)).child(searchBox).child(fileList))
         .child(edge)
         .child(v_flex().flex_1().min_w(0).min_h(0).child(diff).child(footer)));
   }

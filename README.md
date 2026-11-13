@@ -16,7 +16,7 @@ A layout for the [Herdr app](https://herdr.dev) for running many coding agents a
 
 **Pull requests, yours and the ones waiting on you.** A button above the sidebar, with a blue dot while a review request is new, swaps the work area for every open pull request you wrote and every one asking for your review, across GitHub. Each shows who reviewed as avatars badged approved, changes requested or commented; select one to mark it seen and see whose approval it still needs, its checks and conversation, open it on GitHub, or review its changes in a worktree with a review tab. An optional rule says whose approvals a repo needs ("ana, and bo or cy"), and shows Approved or 1 of 2.
 
-**Review before you merge.** **+ → Review changes** opens the diff as GitHub draws it: uncommitted, the last commit, or the whole branch. Comment on a line, a range or a hunk; comments stay in place while the agent keeps changing the file. Send them to an agent already in that project, or start a new Claude Code or Codex with them as its first message.
+**Review before you merge.** **+ → Review changes** opens the diff as GitHub draws it: uncommitted, the last commit, or the whole branch. Search every changed line and see the matches file by file, as Zed's project search does, with next and previous. Comment on a line, a range or a hunk; comments stay in place while the agent keeps changing the file. Send them to an agent already in that project, or start a new Claude Code or Codex with them as its first message.
 
 ![The review tab: a diff of lib/request.js with a draft comment, ready to send to an agent](docs/review.png)
 
