@@ -3,6 +3,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { namer } from "./name.js";
 import { spaces, panes, agents, focused, props, shared, setShared, nextCommand, knownAgents, run, exec, hc, readTextFile, watchFolder, theme, settings, notify, openOverlay, closeOverlay } from "herdr";
+import { untrackedLines } from "./untracked.js";
 
 // Reads write nothing under .git, so the folder watch doesn't wake on its own refresh.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -401,12 +402,9 @@ export default class Review extends View {
           const path = fields[i + 1];
           if (path) files.push({ path, status: fields[i][0], ...(stat[path] ?? { add: 0, del: 0 }) });
         }
-        // Every line of an untracked file is added; grep -I counts a binary one as none.
-        const fresh = untracked.stdout.split("\0").filter(Boolean), lines = {};
-        if (fresh.length) {
-          const r = await exec("sh", ["-c", "git ls-files -z -o --exclude-standard | xargs -0 grep -cHI ''"], { cwd: root, on });
-          for (const l of r.stdout.split("\n")) { const i = l.lastIndexOf(":"); if (i > 0) lines[l.slice(0, i)] = parseInt(l.slice(i + 1), 10) || 0; }
-        }
+        // Every line of an untracked file is added; a binary one has none.
+        const fresh = untracked.stdout.split("\0").filter(Boolean);
+        const lines = fresh.length ? (await untrackedLines(root, on, { perFile: true })).files : {};
         for (const path of fresh) files.push({ path, status: "A", fresh: true, add: lines[path] ?? 0, del: 0 });
         files.sort((a, b) => a.path.localeCompare(b.path));
         if (mode !== this.mode) return;

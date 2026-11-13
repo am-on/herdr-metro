@@ -6,6 +6,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { spaces, agents, terminals, machines, panes, layout, run, openOverlay, exec, hc, home, theme, shared, setShared, watchFolder, window } from "herdr";
+import { untrackedLines } from "./untracked.js";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 // `ps`: panes(), read once by the caller (each read copies every pane).
@@ -222,7 +223,7 @@ export default class Spaces extends View {
           info.behind = Math.abs(parseInt(b, 10)) || 0;
         }
       }
-      Object.assign(info, await this.changes(r.stdout, cwd, on));
+      Object.assign(info, await this.changes(r.stdout, cwd, on, info.top));
       info.ahead = await this.unpushed(r.stdout, info, cwd, on);
       info.rewritten = await this.rewritten(info, cwd, on);
       this.git[key] = info;
@@ -247,7 +248,7 @@ export default class Spaces extends View {
   }
 
   // Uncommitted lines, as a review of Uncommitted counts them: tracked files against HEAD, every line of an untracked one.
-  async changes(status, cwd, on) {
+  async changes(status, cwd, on, top) {
     const lines = status.split("\n");
     let add = 0, del = 0;
     const sum = (out) => {
@@ -263,11 +264,7 @@ export default class Spaces extends View {
       if (lines.includes("# branch.oid (initial)")) for (const args of [["--cached"], []]) sum((await git(args)).stdout);
       else sum((await git(["HEAD"])).stdout);
     }
-    if (lines.some((l) => l.startsWith("? "))) {
-      // grep -I counts a binary file as no lines.
-      const r = await exec("sh", ["-c", "git ls-files -z -o --exclude-standard | xargs -0 grep -cHI ''"], { cwd, on });
-      for (const l of r.stdout.split("\n")) add += parseInt(l.slice(l.lastIndexOf(":") + 1), 10) || 0;
-    }
+    if (lines.some((l) => l.startsWith("? "))) add += (await untrackedLines(top || cwd, on)).total;
     return { add, del };
   }
 
