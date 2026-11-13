@@ -8,7 +8,7 @@ const FIELDS = `number title url isDraft createdAt updatedAt headRefName baseRef
   reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login avatarUrl(size: 64) } ... on Team { name } } } }
   latestReviews(first: 20) { nodes { state submittedAt author { login avatarUrl(size: 64) } } }
   comments(last: 20) { totalCount nodes { createdAt author { login avatarUrl(size: 64) } } }
-  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+  commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
   allCommits: commits { totalCount }`;
 
 // When reviews were requested, for `askedAt`.
@@ -71,7 +71,7 @@ export async function pulls() {
       .sort((a, b) => rank[a.state] - rank[b.state]);
     const requested = pr.reviewRequests.nodes.map((n) => (n.requestedReviewer?.login ? seen(n.requestedReviewer) : n.requestedReviewer?.name))
       .filter((l) => l && !verdict.has(l));
-    return { ...pr, author, repo: pr.repository.nameWithOwner, reviewers, requested, ci: pr.commits.nodes[0]?.commit.statusCheckRollup?.state ?? null };
+    return { ...pr, author, repo: pr.repository.nameWithOwner, reviewers, requested, ci: pr.commits.nodes[0]?.commit.statusCheckRollup?.state ?? null, head: pr.commits.nodes[0]?.commit.oid ?? null };
   };
   return { me, mine: data.mine.nodes.filter((n) => n.number).map(shape),
     asked: data.asked.nodes.filter((n) => n.number).map((pr) => ({ ...shape(pr), askedAt: askedAt(pr, me) })) };
@@ -147,6 +147,14 @@ export function approval(pr, rules) {
   const n = met.filter((g) => g.length).length;
   return { level: n === rule.need.length ? "full" : n ? "part" : "none", n, of: rule.need.length, met, need: rule.need };
 }
+
+// What happened on a pull request of yours worth telling you about, as tokens: each approval and each request for
+// changes (by whom and when), and its checks failing on its latest push. metro-chrome repeats this to raise its dot
+// and toasts; one not in shared `metro-prs.mine-seen` is new until the pull request is shown here.
+export const updates = (pr) => [
+  ...pr.reviewers.filter((r) => r.state === "APPROVED" || r.state === "CHANGES_REQUESTED").map((r) => `${r.state}:${r.login}:${r.at}`),
+  ...(["FAILURE", "ERROR"].includes(pr.ci) && pr.head ? [`FAILED:${pr.head}`] : []),
+];
 
 // owner/repo from an origin URL in https, ssh or scp form.
 export function repoOf(url) {

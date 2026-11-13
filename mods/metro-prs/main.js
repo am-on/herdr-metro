@@ -10,7 +10,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
 import { run, spaces, panes, shared, setShared, nextCommand, settings, home, pickFolder, layout, notify, knownAgents } from "herdr";
-import { pulls, conversation, checkouts, checkout, clone, exists, nearby, renamed, sameRepo, open, approval, approvalRules, cachedAvatars, fetchAvatars, avatarFile, avatarKey,
+import { pulls, conversation, checkouts, checkout, clone, exists, nearby, renamed, sameRepo, open, approval, approvalRules, cachedAvatars, fetchAvatars, avatarFile, avatarKey, updates,
   COLUMNS, boards, issues, issueConversation, branchName, issueBranches, start, assign, moveToInProgress } from "./github.js";
 
 // Looked up again this often, and on Refresh.
@@ -35,7 +35,12 @@ const after = (cx, ms) => new Promise((done) => cx.timer.after(ms, () => done())
 const hidden = () => new Set(shared("metro-prs.hidden") ?? []);
 // Which review request of each pull request was shown here: URL -> its `askedAt`.
 const seen = () => shared("metro-prs.seen") ?? {};
-const isNew = (pr) => Boolean(pr.askedAt) && seen()[pr.url] !== pr.askedAt;
+// What was shown of each pull request of yours: URL -> its `updates` then; written first by metro-chrome, so until
+// then nothing of yours is new.
+const mineSeen = () => shared("metro-prs.mine-seen");
+const hasNews = (pr) => !pr.askedAt && Boolean(mineSeen()) && updates(pr).some((u) => !(mineSeen()[pr.url] ?? []).includes(u));
+// A review request you haven't seen, or an approval, a request for changes or failing checks on yours.
+const isNew = (pr) => (Boolean(pr.askedAt) && seen()[pr.url] !== pr.askedAt) || hasNews(pr);
 function find(node, id) {
   if (node?.id === id) return node;
   for (const child of node?.children ?? []) {
@@ -286,6 +291,10 @@ export default class Prs extends View {
         const asking = new Set(this.data.asked.map((pr) => pr.url)), read = Object.entries(seen());
         if (read.some(([u]) => !asking.has(u))) setShared("metro-prs.seen", Object.fromEntries(read.filter(([u]) => asking.has(u))));
         this.publishNew();
+        // What the brand bar would ask GitHub for, so it doesn't while this runs.
+        const off = hidden();
+        setShared("metro-prs.polled", { at: Date.now(), asked: this.data.asked.filter((pr) => !off.has(pr.url) && isNew(pr)).length,
+          mine: this.data.mine.map((pr) => ({ url: pr.url, number: pr.number, title: pr.title, updates: updates(pr) })) });
         const sel = this.all().find((pr) => pr.url === this.sel) ?? this.visible()[0];
         this.sel = sel?.url ?? null;
         if (sel) this.loadDetail(sel, cx);
@@ -355,6 +364,7 @@ export default class Prs extends View {
   markSeen() {
     const pr = this.all().find((p) => p.url === this.sel);
     if (!pr || !isNew(pr) || this.mode !== "prs" || find(layout(), "view")?.active !== "prs") return;
+    if (hasNews(pr)) return setShared("metro-prs.mine-seen", { ...mineSeen(), [pr.url]: updates(pr) });
     setShared("metro-prs.seen", { ...seen(), [pr.url]: pr.askedAt });
     this.publishNew();
   }
