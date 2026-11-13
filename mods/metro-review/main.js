@@ -520,7 +520,7 @@ export default class Review extends View {
     const sorted = [...list].sort((a, b) => a.path.localeCompare(b.path) || a.to.number - b.to.number);
     const parts = sorted.map((c, i) => `### ${i + 1}. ${c.path}, ${c.lines}\n\`\`\`\n${c.quote}\n\`\`\`\n${c.body}`);
     const how = "Each quotes its lines as number, sign (+ added, - removed) and code; removed lines carry the old file's numbers.";
-    return `Review comments on ${what} in ${this.root}. Please address each one. ${how}\n\n${parts.join("\n\n")}`;
+    return `Review comments on ${what} in ${this.root}. Where a comment asks a question, answer it and change nothing; change code only where a comment asks for a change. ${how}\n\n${parts.join("\n\n")}`;
   }
 
   // Clicking an agent sends at once; clicking New starts that agent with the comments.
