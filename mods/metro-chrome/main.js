@@ -1,9 +1,8 @@
 // The brand bar above the sidebar: room for the macOS window buttons, a place to drag the window, then Back and
-// Forward, Projects (the overview), Pull requests (with a dot while a review request is new or yours have news), Settings (with a
-// dot when an update is ready) and the sidebar toggle at its right edge.
+// Forward, then Projects (the overview) and Pull requests (with a dot while a review request is new) at its right edge.
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { theme, run, updates, layout, shared, setShared, exec, focused, spaces, notify } from "herdr";
+import { theme, run, layout, shared, setShared, exec, focused, spaces, notify } from "herdr";
 
 // From GitHub through `gh`: how many open pull requests ask for your review and haven't been shown since they asked,
 // leaving out the ones hidden in the pull requests view, and your own open pull requests with what happened on each:
@@ -189,9 +188,6 @@ export default class Brand extends View {
       .child(button("prs", prsLabel, "mods/metro-chrome/icons/git-pull-request.svg",
         () => run("layout.select", { stack: "view", child: prsShown ? "main" : "prs" }))
         .when(prsShown, el => el.bg(t.background).text_color(t.foreground))
-        .when(fresh + news > 0, el => el.child(div().absolute().top(4).right(4).size(7).rounded_full().bg(t.accent))))
-      .child(button("settings", "Settings", "mods/metro-chrome/settings.svg", () => run("app.settings"))
-        .when(Boolean(updates().app.ready), el => el.child(div().absolute().top(4).right(4).size(7).rounded_full().bg(t.accent))))
-      .child(button("sidebar-toggle", "Hide sidebar", "mods/metro-chrome/icons/sidebar.svg", () => run("layout.toggle", { id: "sidebar" })));
+        .when(fresh + news > 0, el => el.child(div().absolute().top(4).right(4).size(7).rounded_full().bg(t.accent))));
   }
 }
