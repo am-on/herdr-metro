@@ -3,7 +3,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Button, Scrollbar } from "gpui-base";
-import { agents, terminals, panes, focused, run, hc, theme, shared, setShared, setAgentOrder, layout } from "herdr";
+import { agents, terminals, panes, spaces, focused, run, hc, home, theme, shared, setShared, setAgentOrder, layout } from "herdr";
 import { namer } from "./name.js";
 
 function find(node, id) {
@@ -24,8 +24,14 @@ const headingMark = (t, kind) => {
   if (kind === "done") return box(div().size(8).rounded_full().bg(t.done));
   if (kind === "idle") return box(div().size(8).rounded_full().border(1.5).border_color(t.dim));
   if (kind === "check") return box(svg("mods/metro-chrome/icons/bookmark-filled.svg").size(11).text_color(t.accent));
+  if (kind === "review") return box(svg("mods/metro-chrome/icons/git-compare.svg").size(12).text_color(t.muted));
+  if (kind === "terminal") return box(svg("mods/metro-chrome/icons/terminal.svg").size(12).text_color(t.muted));
   return null;
 };
+// What a review compares, as its switch names it.
+const REVIEW_MODE = { uncommitted: "Uncommitted", last: "Last commit", branch: "Branch" };
+// Sections that show their first five, with a row under them for the rest.
+const SHORT = new Set(["sec-1", "sec-terminal"]);
 // How long a box takes to slide to its new place, and to fade in or out.
 const MOVE = { duration: 260, easing: "ease-in-out" };
 const FADE = 180;
@@ -477,7 +483,70 @@ export default class Agents extends View {
           .when(Boolean(git), el => el.children(gitMarks(t, git, a.address)))));
     };
 
-    // Priority sections in list order, pinned agents first in their own.
+    // Reviews and plain terminals, in panes like the agents: each a pane of a tab, in its space's project.
+    const spaceOf = new Map(spaces().flatMap((s) => s.tabs.map((c) => [c.id, s])));
+    const tabOf = new Map(spaces().flatMap((s) => s.tabs.map((c) => [c.id, c])));
+    const agentPanes = new Set(agents().map((a) => a.pane));
+    const focusedPane = focused()?.pane;
+    const others = panes().flatMap((p) => {
+      const s = spaceOf.get(p.tab);
+      const kind = p.mod === "metro-review" ? "review" : p.terminal && p.status == null && !agentPanes.has(p.pane) ? "terminal" : null;
+      if (!s || !kind) return [];
+      return [{ kind, address: `${kind}:${p.pane}`, p, space: s.id, space_name: s.name, tab: p.tab, focused: p.pane === focusedPane }];
+    });
+    // A project's panes together, projects in the order of their first.
+    const byProject = (xs) => {
+      const first = new Map();
+      xs.forEach((x, i) => { if (!first.has(projectOf(x).key)) first.set(projectOf(x).key, i); });
+      return [...xs].sort((x, y) => first.get(projectOf(x).key) - first.get(projectOf(y).key));
+    };
+    const homeDir = home();
+    const tilde = (dir) => (dir && homeDir && (dir === homeDir || dir.startsWith(homeDir + "/")) ? "~" + dir.slice(homeDir.length) : dir);
+    // Two lines, as an agent's: a review's name, then what it compares and its size; a terminal's program or title, then its branch or folder.
+    const otherRow = (x) => {
+      const { p } = x, review = x.kind === "review", hovered = this.hovered === x.address;
+      const tab = tabOf.get(p.tab), sum = review ? shared(`metro-review.${p.tab}`) : null;
+      const name = review ? (tab?.named ? tab.name : "Review") : label(p);
+      const pic = review ? svg("mods/metro-chrome/icons/git-compare.svg").size(14).flex_none().text_color(t.foreground)
+        : icon(p.program, 14, t.foreground) ?? svg("mods/metro-chrome/icons/terminal.svg").size(14).flex_none().text_color(t.foreground);
+      const files = sum?.files != null ? ` · ${sum.files} file${sum.files === 1 ? "" : "s"}` : "";
+      const detail = review ? `${REVIEW_MODE[sum?.mode] ?? "Changes"}${files}` : p.branch || tilde(p.cwd) || "";
+      const git = review ? (sum ? { add: sum.add, del: sum.del } : null)
+        : p.branch && gitOf[x.space]?.branch === p.branch ? gitOf[x.space] : null;
+      const close = Button.new(`close-${x.address}`)
+        .size(20).flex_none().flex().items_center().justify_center()
+        .rounded(4).text_color(t.dim)
+        .accessibility_label(review ? "Close review" : "Close terminal").tooltip(review ? "Close review" : "Close terminal")
+        .hover(s => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); this.hovered = null; run("pane.close", { pane: p.pane }); cx.notify(); })
+        .child(svg("mods/metro-chrome/icons/close.svg").size(13).flex_none());
+      return v_flex()
+        .id(`other-${x.address}`)
+        .w_full().min_w(0).px(10).py(6).gap(2).flex_none().rounded(10).text_size(12.5)
+        .border(1).border_color("#00000000")
+        .when(x.focused, (el) => el.bg(t.background).border_color(t.border))
+        .when(hovered, (el) => el.bg(t.background).border_color(t.dim))
+        .role("button").accessibility_label(name)
+        .on_hover((on, cx) => {
+          if (on) this.hovered = x.address;
+          else if (this.hovered === x.address) this.hovered = null;
+          cx.notify();
+        })
+        .on_click(() => {
+          if (find(layout(), "view")?.active === "prs") run("layout.select", { stack: "view", child: "main" });
+          run("tab.select", { id: p.tab });
+          run("pane.focus", { pane: p.pane });
+        })
+        .child(h_flex().w_full().min_w(0).gap(10).items_center()
+          .child(h_flex().size(18).flex_none().items_center().justify_center().child(pic))
+          .child(div().flex_1().min_w(0).truncate().text_color(x.focused ? t.foreground : t.muted).child(name))
+          .child(h_flex().h(18).flex_none().items_center().when(hovered, (el) => el.child(close))))
+        .child(h_flex().w_full().min_w(0).pl(28).gap(8).items_center().text_size(12).text_color(t.dim)
+          .child(div().flex_1().min_w(0).truncate().child(detail))
+          .when(Boolean(git), (el) => el.children(gitMarks(t, git, x.address))));
+    };
+
+    // Priority sections in list order, pinned agents first in their own; then reviews and terminals.
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     for (const a of rest) {
       const r = sectionOf(a);
@@ -485,6 +554,9 @@ export default class Agents extends View {
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
       else groups.push({ id, label: SECTION[r], status: SECTION_STATUS[r], members: [a] });
     }
+    const reviews = byProject(others.filter((x) => x.kind === "review")), shells = byProject(others.filter((x) => x.kind === "terminal"));
+    if (reviews.length) groups.push({ id: "sec-review", label: "Reviews", status: "review", members: reviews });
+    if (shells.length) groups.push({ id: "sec-terminal", label: "Terminals", status: "terminal", members: shells });
 
     // A section's header, its still state mark and its name in bold, in its status color. Later ones keep 8px above.
     const header = (g, i) => {
@@ -499,21 +571,21 @@ export default class Agents extends View {
         .text_size(11)
         // Working is green, as its spinner; Idle's theme color is a faint grey meant for marks, so its header is a dark grey.
         .child(headingMark(t, g.status))
-        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_size(13).text_color({ check: t.accent, working: t.ansi2, idle: t.foreground + "bb" }[g.status] ?? t[g.status] ?? t.dim).child(g.label))
+        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_size(13).text_color({ check: t.accent, working: t.ansi2, idle: t.foreground + "bb", review: t.foreground + "bb", terminal: t.foreground + "bb" }[g.status] ?? t[g.status] ?? t.dim).child(g.label))
         // A count only where the rows don't show it at a glance: past five. Ringed, as Spaces' hidden worktrees.
         .when(g.members.length > 5, (el) => el.child(div().size(22).flex_none().rounded_full().border(1).border_color(t.border)
           .flex().items_center().justify_center().text_size(11).text_color(t.muted).child(String(g.members.length))));
     };
-    // Idle shows its first five; a row under them shows the rest.
+    // Idle and Terminals show their first five; a row under them shows the rest.
     const IDLE_SHOWN = 5;
     const more = (g, n) => h_flex().id(`${g.id}-more`).h(28).flex_none().px(10).gap(10).items_center().rounded(8)
       .border(1).border_color("#00000000").text_size(12).text_color(t.dim)
       .on_hover((over, cx) => { if (over) this.hovered = `${g.id}-more`; else if (this.hovered === `${g.id}-more`) this.hovered = null; cx.notify(); })
       .when(this.hovered === `${g.id}-more`, (el) => el.bg(t.background).border_color(t.dim).text_color(t.foreground))
-      .role("button").accessibility_label(this.allIdle ? "Show fewer" : `Show ${n} more`)
-      .on_click((_e, cx) => { this.allIdle = !this.allIdle; cx.notify(); })
+      .role("button").accessibility_label(this.expanded?.[g.id] ? "Show fewer" : `Show ${n} more`)
+      .on_click((_e, cx) => { this.expanded = { ...this.expanded, [g.id]: !this.expanded?.[g.id] }; cx.notify(); })
       .child(div().w(14).flex_none())
-      .child(this.allIdle ? "Show fewer" : `${n} more`);
+      .child(this.expanded?.[g.id] ? "Show fewer" : `${n} more`);
     // A project's avatar, in its color from Projects, and title above each run of its agents. The run hangs from
     // a rail in that color, starting under the avatar, the rows indented past it, as Projects draws a project.
     const colors = shared("space.colors") ?? {};
@@ -540,7 +612,7 @@ export default class Agents extends View {
         return { run, name: `${g.id}-${pk}${n > 1 ? `-${n}` : ""}` };
       });
     };
-    const shownOf = (g) => g.id === "sec-1" && !this.allIdle ? g.members.slice(0, IDLE_SHOWN) : g.members;
+    const shownOf = (g) => SHORT.has(g.id) && !this.expanded?.[g.id] ? g.members.slice(0, IDLE_SHOWN) : g.members;
     const runKey = this.runKeys(groups.flatMap((g) => runsOf(g, shownOf(g))));
     const bySpace = (g, as) => {
       runsOf(g, as).forEach(({ run, name }, ri) => {
@@ -550,6 +622,7 @@ export default class Agents extends View {
         items.at(-1).fixed = true;
         const from = items.length;
         run.forEach((a, i) => {
+          if (a.kind) return put(`ag-${a.address}`, () => otherRow(a), 54, 26);
           const subs = this.tree(all, a.address);
           put(`ag-${a.address}`, () => row(a, i, subs), branchOf.get(a.address) ? 54 : 32, 26);
           if (!this.isFolded(a.address)) for (const sub of subs) put(`sub-${sub.t.address}`, () => this.subRow(t, sub, shown), 32, 26);
@@ -559,8 +632,8 @@ export default class Agents extends View {
     };
     groups.forEach((g, i) => {
       put(`head-${g.id}`, () => header(g, i), i > 0 ? 32 : 24);
-      if (g.id !== "sec-1" || g.members.length <= IDLE_SHOWN) return bySpace(g, g.members);
-      bySpace(g, this.allIdle ? g.members : g.members.slice(0, IDLE_SHOWN));
+      if (!SHORT.has(g.id) || g.members.length <= IDLE_SHOWN) return bySpace(g, g.members);
+      bySpace(g, shownOf(g));
       put(`${g.id}-more`, () => more(g, g.members.length - IDLE_SHOWN), 28);
     });
     let y = 0;
@@ -626,7 +699,7 @@ export default class Agents extends View {
       .text_size(13)
       // No heading: the sections say what the list is. The line between this list and Projects is the layout's divider.
       .pt(10)
-      .when(list.length === 0, (el) =>
+      .when(list.length === 0 && !others.length, (el) =>
         el.child(div().px(16).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
       // The list scrolls beside an always-visible 10px bar on its right edge, 5px clear of it.
