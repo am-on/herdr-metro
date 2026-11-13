@@ -118,19 +118,22 @@ export async function fetchAvatars(logins, have) {
   return got;
 }
 
-// The approval rules from the untracked metro-prs.json in Herdr's folder:
-// { "approval": [{ "owners": ["acme"], "need": [["ana"], ["bo", "cy"]] }] }. A repo whose owner is listed
-// needs an approval from someone in every group of `need`. Without the file, none: { rules, error }.
+// The approval rules and the repos whose issues stay out of the Issues tab, from the untracked metro-prs.json in
+// Herdr's folder: { "approval": [{ "owners": ["acme"], "need": [["ana"], ["bo", "cy"]] }], "issues": { "skip": ["acme/site"] } }.
+// A repo whose owner is listed needs an approval from someone in every group of `need`. Without the file, none:
+// { rules, skip: lower-case "owner/repo"s, error }.
 export async function approvalRules() {
   const text = await readTextFile(`${appHome()}/metro-prs.json`).catch(() => null);
-  if (!text) return { rules: [], error: "" };
+  if (!text) return { rules: [], skip: new Set(), error: "" };
   try {
-    const rules = JSON.parse(text).approval ?? [];
+    const json = JSON.parse(text), rules = json.approval ?? [], skip = json.issues?.skip ?? [];
     if (!Array.isArray(rules) || rules.some((r) => !Array.isArray(r.owners) || !Array.isArray(r.need) || r.need.some((g) => !Array.isArray(g))))
       throw new Error('"approval" should be a list of { "owners": [...], "need": [[...], ...] }');
-    return { rules, error: "" };
+    if (!Array.isArray(skip) || skip.some((r) => typeof r !== "string" || !r.includes("/")))
+      throw new Error('"issues": { "skip": [...] } should list repos as "owner/repo"');
+    return { rules, skip: new Set(skip.map((r) => r.toLowerCase())), error: "" };
   } catch (e) {
-    return { rules: [], error: `metro-prs.json: ${e.message ?? e}. Fix it, then refresh.` };
+    return { rules: [], skip: new Set(), error: `metro-prs.json: ${e.message ?? e}. Fix it, then refresh.` };
   }
 }
 
@@ -272,3 +275,136 @@ export async function checkout(main, pr) {
 }
 
 export const open = (url) => exec("open", [url]).catch(() => {});
+
+// The board columns work starts from, nearest to done first. Boards spell them in either case ("This week").
+export const COLUMNS = ["In Progress", "This Week", "New Week", "Estimation"];
+const column = (name) => COLUMNS.find((c) => c.toLowerCase() === String(name ?? "").toLowerCase()) ?? null;
+
+const BOARDS = `query { viewer { login organizations(first: 20) { nodes { projectsV2(first: 50) { nodes {
+  id title url closed field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } } } } } } } }`;
+
+const ITEMS = `items(first: 30, query: ${JSON.stringify(`is:issue is:open status:${COLUMNS.map((c) => (c.includes(" ") ? `"${c}"` : c)).join(",")}`)}) { nodes {
+  id fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+  content { ... on Issue { number title url body createdAt updatedAt repository { nameWithOwner }
+    author { login avatarUrl(size: 64) } assignees(first: 5) { nodes { login avatarUrl(size: 64) } }
+    labels(first: 5) { nodes { name color } } comments { totalCount }
+    closedByPullRequestsReferences(first: 3, includeClosedPrs: false) { nodes { number url title isDraft headRefName } } } } } }`;
+
+// The project boards of your organizations that run the Niteo workflow (a Status column named Estimation), and your
+// login: { me, boards: [{ id, title, url }] }. Asked rarely; the items are what change.
+export async function boards() {
+  const data = await graphql(BOARDS, {});
+  const all = data.viewer.organizations.nodes.flatMap((o) => o?.projectsV2.nodes ?? []);
+  return { me: data.viewer.login, boards: all.filter((b) => b && !b.closed && b.field?.options?.some((o) => o.name.toLowerCase() === "estimation"))
+    .map((b) => ({ id: b.id, title: b.title, url: b.url, field: b.field.id, inProgress: b.field.options.find((o) => o.name.toLowerCase() === "in progress")?.id ?? null })) };
+}
+
+// The open issues in those columns of these boards that are yours or no one's, one per issue, nearest to done first,
+// then the latest updated.
+export async function issues({ me, boards }) {
+  if (!boards.length) return [];
+  const data = await graphql(`query { ${boards.map((b, i) => `b${i}: node(id: ${JSON.stringify(b.id)}) { ... on ProjectV2 { ${ITEMS} } }`).join("\n")} }`, {});
+  const out = new Map();
+  boards.forEach((b, i) => {
+    for (const item of data[`b${i}`]?.items.nodes ?? []) {
+      const c = item.content, col = column(item.fieldValueByName?.name);
+      if (!c?.number || !col || out.has(c.url)) continue;
+      const assignees = c.assignees.nodes.map(seen);
+      if (assignees.length && !assignees.includes(me)) continue;
+      out.set(c.url, { ...c, kind: "issue", author: seen(c.author), repo: c.repository.nameWithOwner, board: b.title, boardUrl: b.url, item: item.id, project: b.id, statusField: b.field, inProgress: b.inProgress, column: col, assignees,
+        labels: c.labels.nodes, comments: c.comments.totalCount, linked: c.closedByPullRequestsReferences?.nodes ?? [] });
+    }
+  });
+  return [...out.values()].sort((a, b) => COLUMNS.indexOf(a.column) - COLUMNS.indexOf(b.column) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+const MOVE = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+  updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
+}`;
+
+// What failed and what to do about it; a missing scope says how to add it.
+const failed = (e, what, button) => /scope/i.test(e)
+  ? `Couldn't ${what}: GitHub needs the project scope. Run \`gh auth refresh -s project\` in a terminal, then click ${button} again.`
+  : `Couldn't ${what}: ${e}. Try ${button} again, or do it on GitHub.`;
+
+// Assigns the issue to you.
+export async function assign(issue) {
+  const r = await exec("gh", ["issue", "edit", String(issue.number), "--repo", issue.repo, "--add-assignee", "@me"]);
+  if (r.code !== 0) throw new Error(failed((r.stderr || r.stdout || "gh issue edit failed").trim().split("\n")[0], "assign it to you", "Assign me"));
+}
+
+// Moves the issue's card on its board to In Progress.
+export async function moveToInProgress(issue) {
+  try { await graphql(MOVE, { project: issue.project, item: issue.item, field: issue.statusField, option: issue.inProgress }); }
+  catch (e) { throw new Error(failed(`${e.message ?? e}`, "move it to In Progress", "Move to In Progress")); }
+}
+
+const ISSUE = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { issue(number: $number) {
+    comments(last: 30) { nodes { body createdAt url author { login avatarUrl(size: 64) } } } } }
+}`;
+
+// An issue's comments, newest first, shaped as `conversation`'s events: { events }.
+export async function issueConversation(issue) {
+  const [owner, name] = issue.repo.split("/");
+  const i = (await graphql(ISSUE, { owner, name, number: issue.number })).repository.issue;
+  const events = i.comments.nodes.map((c) => ({ kind: "comment", state: "COMMENTED", login: seen(c.author), at: c.createdAt, body: c.body.trim(), url: c.url, inline: [], more: 0 }))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  return { events };
+}
+
+const SMALL = new Set(["a", "an", "the", "to", "of", "for", "in", "on", "and", "or", "with", "when", "from", "is", "be", "can", "it", "its", "that", "this", "as", "at", "by", "i", "e", "bug"]);
+
+// A branch name for an issue, as branches are named here: fix/ for a bug, else feat/, then its number and a few words of
+// its title: fix/331-scanned-expense-cent-off.
+export function branchName(issue) {
+  const bug = issue.labels.some((l) => /bug/i.test(l.name)) || /^(\[bug\]|fix\b)/i.test(issue.title);
+  const words = issue.title.toLowerCase().replace(/\[[^\]]*\]/g, " ").replace(/`/g, "").split(/[^a-z0-9]+/).filter((w) => w && !SMALL.has(w)).slice(0, 4);
+  return `${bug ? "fix" : "feat"}/${issue.number}${words.length ? `-${words.join("-")}` : ""}`;
+}
+
+// What a checkout already has for an issue, without asking origin: its branches here or on origin named after the
+// issue's number (fix/331-…), local ones first, and origin's default branch as last seen: { branches, base }.
+export async function issueBranches(main, number) {
+  const refs = await git(main, ["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads", "refs/remotes/origin"]);
+  const head = await git(main, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  const names = refs.out.split("\n").filter(Boolean)
+    .map((r) => r.replace(/^refs\/heads\//, "").replace(/^refs\/remotes\/origin\//, ""))
+    .filter((b) => b !== "HEAD" && new RegExp(`(^|/)${number}(-|$)`).test(b));
+  return { branches: [...new Set(names)], base: head.ok ? head.out.replace(/^origin\//, "") : null };
+}
+
+// Origin's default branch, asked of origin, as a checkout's origin/HEAD never follows a rename; the local one offline.
+async function defaultBranch(main) {
+  const r = await git(main, [...overHttps(null), "ls-remote", "--symref", "origin", "HEAD"]);
+  const m = /^ref: refs\/heads\/(\S+)\s+HEAD/m.exec(r.out);
+  if (m) return m[1];
+  const head = await git(main, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  return head.ok ? head.out.replace(/^origin\//, "") : null;
+}
+
+// The folder where `branch` is checked out, made a worktree of `main` when it isn't yet: the branch here, else the one
+// on origin tracked, else a new branch off origin's latest default branch, not tracking it: { path }.
+export async function start(main, branch) {
+  const list = await git(main, ["worktree", "list", "--porcelain"]);
+  const found = list.out.split(/\n\n+/).map((b) => b.split("\n"))
+    .find((lines) => lines.includes(`branch refs/heads/${branch}`))?.find((l) => l.startsWith("worktree "))?.slice(9);
+  if (found) return { path: found };
+  const path = `${home()}/.herdr/worktrees/${main.split("/").pop()}/${slug(branch)}`;
+  const check = await git(main, ["check-ref-format", "--branch", branch]);
+  if (!check.ok) throw new Error(`${branch} can't be a branch name. Change it, then try again.`);
+  let add;
+  if ((await git(main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).ok) add = [path, branch];
+  else if ((await git(main, [...overHttps(null), "fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`])).ok)
+    add = ["--track", "-b", branch, path, `origin/${branch}`];
+  else {
+    const base = await defaultBranch(main);
+    if (!base) throw new Error("Couldn't tell origin's default branch. Check your connection, then try again.");
+    const f = await git(main, [...overHttps(null), "fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`]);
+    if (!f.ok) throw new Error(`Couldn't fetch ${base} from origin: ${f.err}. Check your connection, then try again.`);
+    add = ["--no-track", "-b", branch, path, `origin/${base}`];
+  }
+  const r = await git(main, ["worktree", "add", "--quiet", ...add]);
+  if (!r.ok) throw new Error(r.err || "git worktree add failed.");
+  return { path };
+}

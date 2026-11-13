@@ -68,13 +68,23 @@ export default class Tabs extends View {
     this.gh = new Map();
     cx.timer.every(180000, (cx) => { if (this.at) this.fetchGh(this.at, cx); });
     // `metro-tabs.view` (cmd-shift-a in keys.json) switches between the tabs and the agent view; `metro-tabs.overview`
-    // (cmd-p) opens and closes the overview of every project; `metro-tabs.scratch` (cmd-n) opens a one-off terminal.
+    // (cmd-p) opens and closes the overview of every project; `metro-tabs.scratch` (cmd-n) opens a one-off terminal;
+    // `metro-tabs.prs` (cmd-r) and `metro-tabs.issues` (cmd-i) open the pull requests view on that tab of its list
+    // (shared `metro-prs.mode`), and close it when it already shows that tab.
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
         if (c === "view" && find(layout(), "view")) switchView();
         if (c === "overview" && find(layout(), "view")) run("layout.select", { stack: "view", child: overviewView() ? "main" : "overview" });
         if (c === "scratch") this.scratch(cx);
+        if ((c === "prs" || c === "issues") && find(layout(), "view")) {
+          const mode = shared("metro-prs.mode") === "issues" ? "issues" : "prs";
+          if (prsView() && mode === c) run("layout.select", { stack: "view", child: "main" });
+          else {
+            if (mode !== c) setShared("metro-prs.mode", c);
+            run("layout.select", { stack: "view", child: "prs" });
+          }
+        }
         cx.notify();
       }
     });
@@ -203,7 +213,7 @@ export default class Tabs extends View {
   prsBar(t) {
     return h_flex().id("prs-bar").flex_1().min_w(0).h(28).px(8).gap(8).items_center().text_size(13).text_color(t.foreground)
       .child(svg("mods/metro-chrome/icons/git-pull-request.svg").size(14).flex_none().text_color(t.muted))
-      .child(div().truncate().child("Pull requests"));
+      .child(div().truncate().child("Pull requests and issues"));
   }
 
   // In the overview the bar names it; the sidebar's button and the one here lead back.

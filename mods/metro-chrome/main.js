@@ -111,7 +111,7 @@ export default class Brand extends View {
       .on_click(action)
       .child(svg(icon).size(17));
     const overviewShown = find(layout(), "view")?.active === "overview";
-    const prsLabel = prsShown ? "Show tabs" : fresh ? "Pull requests, new review requests" : "Pull requests";
+    const prsLabel = prsShown ? "Show tabs" : fresh ? "Pull requests, new review requests" : "Pull requests and issues";
     // Dimmed, and doing nothing, with nowhere to go that way.
     const step = (id, label, icon, by) => {
       const can = this.next(by) >= 0;
