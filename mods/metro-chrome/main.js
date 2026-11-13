@@ -1,5 +1,5 @@
 // The brand bar above the sidebar: room for the macOS window buttons, a place to drag the window, then Back and
-// Forward, Pull requests (with a dot while a review request is new), Settings (with a dot when an update is ready)
+// Forward, Projects (the overview), Pull requests (with a dot while a review request is new), Settings (with a dot when an update is ready)
 // and the sidebar toggle at its right edge.
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
@@ -91,9 +91,9 @@ export default class Brand extends View {
     const to = this.trail[i];
     this.at = i; this.going = { to, at: Date.now() };
     this.save();
-    const prsShown = find(layout(), "view")?.active === "prs";
+    const away = ["prs", "overview"].includes(find(layout(), "view")?.active);
     if (to.view) { run("layout.select", { stack: "view", child: "prs" }); return; }
-    if (prsShown) run("layout.select", { stack: "view", child: "main" });
+    if (away) run("layout.select", { stack: "view", child: "main" });
     run("tab.select", { id: to.tab });
     if (to.pane) run("pane.focus", { pane: to.pane });
   }
@@ -110,6 +110,7 @@ export default class Brand extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click(action)
       .child(svg(icon).size(17));
+    const overviewShown = find(layout(), "view")?.active === "overview";
     const prsLabel = prsShown ? "Show tabs" : fresh ? "Pull requests, new review requests" : "Pull requests";
     // Dimmed, and doing nothing, with nowhere to go that way.
     const step = (id, label, icon, by) => {
@@ -124,6 +125,9 @@ export default class Brand extends View {
       .child(step("back", "Back", "mods/metro-chrome/icons/arrow-left.svg", -1))
       .child(step("forward", "Forward", "mods/metro-chrome/icons/arrow-right.svg", 1))
       .child(div().w(1).h(16).mx(2).flex_none().bg(t.border))
+      .child(button("overview", overviewShown ? "Show tabs" : "Projects", "mods/metro-chrome/icons/layout-grid.svg",
+        () => run("layout.select", { stack: "view", child: overviewShown ? "main" : "overview" }))
+        .when(overviewShown, el => el.bg(t.background).text_color(t.foreground)))
       .child(button("prs", prsLabel, "mods/metro-chrome/icons/git-pull-request.svg",
         () => run("layout.select", { stack: "view", child: prsShown ? "main" : "prs" }))
         .when(prsShown, el => el.bg(t.background).text_color(t.foreground))

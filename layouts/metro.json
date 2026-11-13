@@ -154,6 +154,15 @@
                   },
                   "background": "background",
                   "children": []
+                },
+                {
+                  "id": "overview",
+                  "type": "block",
+                  "content": {
+                    "mod": "metro-overview"
+                  },
+                  "background": "chrome",
+                  "children": []
                 }
               ]
             }

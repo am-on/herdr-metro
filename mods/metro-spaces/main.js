@@ -1,7 +1,7 @@
 // Workspace spaces: stable colored avatars, worktrees under their checkout,
 // grouped by machine when more than one is known. After a space's name, the repo
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
-// switch, right-click for its menu, drag to reorder.
+// switch, right-click for its menu. Projects and worktrees are in the order they were last shown.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
@@ -20,6 +20,9 @@ const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 
 // Headings are bold in the system font, which has weights (the UI font, Geist, has one).
 const BOLD = ".SystemUIFont";
+// Scratch: one-off terminals (shared `projects.scratch`, space ids, started by `metro-tabs.scratch`), grouped together
+// wherever they cd, never kept.
+const SCRATCH = JSON.stringify(["scratch"]);
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -30,10 +33,10 @@ function find(node, id) {
   return null;
 }
 // The agent view keeps the space of the agent it shows, so space.select alone changes nothing there:
-// show this space's agent (its active tab's first), or the tabs when it has none. The pull requests view gives way
-// to the tabs.
+// show this space's agent (its active tab's first), or the tabs when it has none. The pull requests view and the
+// overview give way to the tabs.
 function select(s) {
-  if (find(layout(), "view")?.active === "prs") run("layout.select", { stack: "view", child: "main" });
+  if (["prs", "overview"].includes(find(layout(), "view")?.active)) run("layout.select", { stack: "view", child: "main" });
   if (find(layout(), "view")?.active === "agent") {
     const tab = s.tabs.find((c) => c.active)?.id, mine = agents().filter((a) => a.space === s.id);
     const a = mine.find((a) => a.tab === tab) ?? mine[0];
@@ -97,9 +100,10 @@ export default class Spaces extends View {
     this.shown = new Set(spaces().map((s) => s.id));
     this.born = {};
     this.pressed = null;
-    this.over = null;
-    this.dragging = null; // the project key whose row is pressed, to drop on another project's row
-    this.dropOn = null;
+    this.inList = false; // the pointer is on the list: the order holds still until it leaves
+    this.held = null; // project key or space id -> its place, as last shown
+    this.lastActive = null;
+    this.projectNoted = false;
     this.renaming = null; // the project key whose title is being edited
     this.nameInput = InputState.new({ placeholder: "Project name" });
     this.nameInput.on("submit", (_e, cx) => this.finishRename(true, cx));
@@ -121,6 +125,34 @@ export default class Spaces extends View {
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
     if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
+    this.noteUse(sp);
+    // Hidden, the list doesn't render: once a second the colors and the projects published for the overview and the
+    // agents list are worked out here too.
+    if (now - (this.workedAt ?? 0) > 1000) { this.workedAt = now; this.paint(); this.ordered(); }
+    // The pointer can leave the window straight from the list without a hover's end: the hold ends with the window's focus.
+    if (this.inList && !window().active) { this.inList = false; cx.notify(); }
+  }
+
+  // When each space was last shown, in shared `spaces.used` (ms), for the order by last use; noted at once, on the
+  // timer, so a hidden sidebar still notes it. A project's own time (`projects.used`, for once it's closed) waits for
+  // its git, which tells which project the space is in.
+  noteUse(sp) {
+    const s = sp.find((x) => x.active), now = Date.now();
+    if (!s) return;
+    if (s.id !== this.lastActive) {
+      this.lastActive = s.id;
+      this.projectNoted = false;
+      const ids = new Set(sp.map((x) => x.id));
+      const spacesUsed = Object.fromEntries(Object.entries(shared("spaces.used") ?? {}).filter(([id]) => ids.has(id)));
+      setShared("spaces.used", { ...spacesUsed, [s.id]: now });
+    }
+    if (this.projectNoted) return;
+    const ps = panes(), at = where(s, ps), g = this.git[at];
+    if (g === undefined || this.unsure.has(at)) return;
+    this.projectNoted = true;
+    const key = g ? g.repo : JSON.stringify(["folder", s.machine ?? null, place(s, ps)]);
+    setShared("projects.used", Object.fromEntries(Object.entries({ ...(shared("projects.used") ?? {}), [key]: (shared("spaces.used") ?? {})[s.id] ?? now })
+      .sort((a, b) => b[1] - a[1]).slice(0, 100)));
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -308,8 +340,8 @@ export default class Spaces extends View {
     openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
   }
 
-  // A header per project, then its checkouts (the main one first, as Main), the ones
-  // no space shows last. Spaces outside a repo stand alone.
+  // A header per project, then its checkouts by last use (the main one named Main), the ones no space shows last.
+  // Spaces outside a repo hang under their folder.
   ordered() {
     const sp = spaces(), ps = panes();
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
@@ -317,32 +349,58 @@ export default class Spaces extends View {
     const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null })).filter((r) => this.shown.has(r.w.id));
     const out = [];
     const placed = new Set();
+    // The most recently shown first; while the pointer is on the list, as last shown.
+    const spaceUsed = shared("spaces.used") ?? {}, held = this.inList ? this.held : null;
+    const byUse = (a, b) => held?.has(a.w.id) && held?.has(b.w.id) ? held.get(a.w.id) - held.get(b.w.id)
+      : (spaceUsed[b.w.id] ?? 0) - (spaceUsed[a.w.id] ?? 0);
+    const tree = {}; // project key -> all its rows, folded or not, for the overview
     // Which project each space sits under, for the agents list to group by: its key, title, avatar letter and lead space (its color).
     const of = {};
+    const scratchIds = new Set(shared("projects.scratch") ?? []);
+    const scratch = list.filter((r) => scratchIds.has(r.w.id)).sort(byUse);
+    if (scratch.length) {
+      const g = { repo: SCRATCH, name: "Scratch", initial: "~", scratch: true };
+      for (const k of scratch) of[k.w.id] = { key: SCRATCH, name: "Scratch", initial: "~", lead: scratch[0].w.id };
+      out.push({ kind: "project", w: scratch[0].w, g, count: scratch.length, sure: false });
+      const kids = scratch.map((k) => ({ kind: "space", ...k, nested: true }));
+      tree[SCRATCH] = kids;
+      if (!this.foldedRepos.has(SCRATCH)) out.push(...kids);
+    }
+    // Spaces closed since are dropped from Scratch's list.
+    const live = new Set(sp.map((x) => x.id));
+    if (sp.length && [...scratchIds].some((id) => !live.has(id))) setShared("projects.scratch", [...scratchIds].filter((id) => live.has(id)));
     for (const r of list) {
+      if (scratchIds.has(r.w.id)) continue;
       // Spaces outside a repo are a project too: their folder is its title, they hang under it.
       if (!r.g) {
         const path = place(r.w, ps), machine = r.w.machine ?? null, key = JSON.stringify(["folder", machine, path]);
         if (placed.has(key)) continue;
         placed.add(key);
-        const here = list.filter((k) => !k.g && (k.w.machine ?? null) === machine && place(k.w, ps) === path);
+        const here = list.filter((k) => !k.g && (k.w.machine ?? null) === machine && place(k.w, ps) === path).sort(byUse);
         const g = { repo: key, name: tilde(path), initial: base(path) || "~", folder: path };
         for (const k of here) of[k.w.id] = { key, name: this.title(g), initial: g.initial, lead: r.w.id };
-        out.push({ kind: "project", w: r.w, g, count: here.length });
-        if (!this.foldedRepos.has(key)) for (const k of here) out.push({ kind: "space", ...k, nested: true });
+        const sure = here.every((k) => where(k.w, ps) in this.git && !this.unsure.has(where(k.w, ps)));
+        out.push({ kind: "project", w: r.w, g, count: here.length, sure });
+        const kids = here.map((k) => ({ kind: "space", ...k, nested: true }));
+        tree[key] = kids;
+        if (!this.foldedRepos.has(key)) out.push(...kids);
         continue;
       }
       if (placed.has(r.g.repo)) continue;
       placed.add(r.g.repo);
-      const open = list.filter((k) => k.g?.repo === r.g.repo).sort((a, b) => a.g.linked - b.g.linked);
+      // Open checkouts by last use (the main one first among never shown), then the ones no space shows.
+      const open = list.filter((k) => k.g?.repo === r.g.repo).sort((a, b) => byUse(a, b) || a.g.linked - b.g.linked);
       const closed = (this.trees[r.g.repo] ?? []).filter((c) => !open.some((k) => k.g.top === c.path));
       const main = closed.find((c) => c.main);
       for (const k of open) of[k.w.id] = { key: r.g.repo, name: this.title(r.g), initial: r.g.initial ?? null, lead: r.w.id };
-      out.push({ kind: "project", w: r.w, g: r.g, count: open.length + closed.length });
-      if (this.foldedRepos.has(r.g.repo)) continue;
-      if (main) out.push({ kind: "checkout", w: r.w, c: main, primary: true });
-      for (const k of open) out.push({ kind: "space", ...k, nested: true, primary: !k.g.linked });
-      for (const c of closed) if (!c.main) out.push({ kind: "checkout", w: r.w, c });
+      out.push({ kind: "project", w: r.w, g: r.g, count: open.length + closed.length, sure: true });
+      const kids = [
+        ...open.map((k) => ({ kind: "space", ...k, nested: true, primary: !k.g.linked })),
+        ...(main ? [{ kind: "checkout", w: r.w, c: main, primary: true }] : []),
+        ...closed.filter((c) => !c.main).map((c) => ({ kind: "checkout", w: r.w, c })),
+      ];
+      tree[r.g.repo] = kids;
+      if (!this.foldedRepos.has(r.g.repo)) out.push(...kids);
     }
     // A kept project keeps its color: a new space of it takes the kept color, a color picked for it is kept.
     const colors = shared("space.colors") ?? {}, painted = {};
@@ -357,26 +415,58 @@ export default class Spaces extends View {
     if (Object.keys(painted).length) setShared("space.colors", { ...colors, ...painted });
     if (changed) setShared("projects.kept", kept);
     if (JSON.stringify(of) !== JSON.stringify(shared("projects.of") ?? {})) setShared("projects.of", of);
+    // Every repo opened is kept, so it stays listed once nothing of it is open, until its × forgets it; a plain folder
+    // only when added (the overview's Add project keeps it), so a cd somewhere doesn't make a project. Never a
+    // temporary folder. Kept as it first shows: a project forgotten while its spaces close isn't kept again.
+    const opened = out.filter((r) => r.kind === "project" && r.sure && !r.g.folder);
+    const fresh = opened.filter((r) => !this.wasOpen?.has(r.g.repo) && !kept.some((k) => k.key === r.g.repo)
+      && !/^\/(private\/)?(tmp|var\/folders)\//.test(r.g.folder ?? r.g.top ?? ""));
+    this.wasOpen = new Set(opened.map((r) => r.g.repo));
+    if (fresh.length && sp.length) {
+      kept.push(...fresh.map((r) => this.keeping(r)));
+      setShared("projects.kept", kept);
+    }
     // Kept projects with nothing open stay after the open ones, in the same colors.
     for (const k of kept) if (!placed.has(k.key)) out.push({ kind: "project", w: { id: null, machine: k.machine }, g: { repo: k.key, name: k.name, initial: k.initial, folder: k.folder ? k.path : null }, closed: k, count: 0 });
-    // Open projects, then closed ones, each in the order the person dragged them into; ones not placed yet follow, as they come.
+    // Open projects, then closed ones, each the most recently shown first. Ones never shown since follow in the order
+    // they were once dragged into (`projects.order`), then as they come.
     const groups = [];
     for (const r of out) r.kind === "project" || !groups.length ? groups.push([r]) : groups.at(-1).push(r);
-    const order = shared("projects.order") ?? [];
-    const rank = (grp, n) => { const at = order.indexOf(grp[0].g?.repo); return at >= 0 ? at : order.length + n; };
-    const sorted = groups.map((grp, n) => [Boolean(grp[0].closed), rank(grp, n), grp])
-      .sort((a, b) => a[0] - b[0] || a[1] - b[1]).map(([, , grp]) => grp);
-    this.projectKeys = sorted.map((grp) => grp[0].g?.repo).filter(Boolean);
+    const used = shared("projects.used") ?? {}, order = shared("projects.order") ?? [];
+    const rank = (key, n) => { const at = order.indexOf(key); return at >= 0 ? at : order.length + n; };
+    const last = (grp) => Math.max(used[grp[0].g?.repo] ?? 0, ...grp.filter((r) => r.kind === "space").map((r) => spaceUsed[r.w.id] ?? 0),
+      ...Object.entries(of).filter(([, o]) => o.key === grp[0].g?.repo).map(([id]) => spaceUsed[id] ?? 0));
+    const sorted = groups.map((grp, n) => ({ grp, key: grp[0].g?.repo, closed: Boolean(grp[0].closed), n, at: last(grp) }))
+      .sort((a, b) => a.closed - b.closed
+        || (held?.has(a.key) && held?.has(b.key) ? held.get(a.key) - held.get(b.key) : 0)
+        || b.at - a.at || rank(a.key, a.n) - rank(b.key, b.n))
+      .map((x) => x.grp);
+    if (!this.inList) this.held = new Map([
+      ...sorted.map((grp, i) => [grp[0].g?.repo, i]),
+      ...sorted.flat().filter((r) => r.kind === "space").map((r, i) => [r.w.id, i]),
+    ]);
+    this.publishTree(sorted.map((grp) => grp[0]), tree);
     return sorted.flat();
   }
 
-  // Dropping a project's row on another's puts it there: after it when dragged down, before it when dragged up.
-  dropProject(from, onto) {
-    const keys = [...this.projectKeys], a = keys.indexOf(from), b = keys.indexOf(onto);
-    if (a < 0 || b < 0 || a === b) return;
-    keys.splice(a, 1);
-    keys.splice(keys.indexOf(onto) + (a < b ? 1 : 0), 0, from);
-    setShared("projects.order", keys);
+  // The projects as listed here, every checkout included however folded, for the overview (metro-overview) in shared
+  // `projects.tree`, only when it changed. Not without spaces (`herdr-app check`), or a check would wipe it.
+  publishTree(heads, tree) {
+    if (!spaces().length) return;
+    const colors = shared("space.colors") ?? {};
+    const out = heads.map((r) => ({
+      key: r.g.repo, name: this.title(r.g), initial: [...(r.g.initial ?? r.g.name)][0]?.toUpperCase() ?? "?",
+      color: r.closed?.color ?? colors[r.w.id] ?? "ansi6", space: r.w.id, machine: r.w.machine ?? null,
+      closed: r.closed ? { path: r.closed.path } : null, folder: r.g.folder ?? null, scratch: Boolean(r.g.scratch),
+      // Its folder: a plain folder's, else the repo's main checkout.
+      path: r.g.folder ?? r.closed?.path ?? this.trees[r.g.repo]?.find((c) => c.main)?.path ?? r.g.top ?? null,
+      rows: (tree[r.g.repo] ?? []).map((k) => k.kind === "space"
+        ? { space: k.w.id, name: k.primary ? "Main" : k.w.name, branch: k.g?.branch ?? null, linked: Boolean(k.g?.linked), top: k.g?.top ?? null }
+        : { path: k.c.path, name: k.primary ? "Main" : base(k.c.path), branch: k.c.branch, main: k.c.main }),
+    }));
+    // Scratch is always there, for its New terminal button.
+    if (!out.some((p) => p.scratch)) out.push({ key: SCRATCH, name: "Scratch", initial: "~", color: "dim", space: null, machine: null, closed: null, folder: null, scratch: true, rows: [] });
+    if (JSON.stringify(out) !== JSON.stringify(shared("projects.tree") ?? [])) setShared("projects.tree", out);
   }
 
   // A project's title: what the person named it, else its repo's name or its folder.
@@ -408,15 +498,16 @@ export default class Spaces extends View {
     return shared("projects.kept") ?? [];
   }
 
-  keep({ w, g }) {
+  // What a kept project remembers: its folder (a repo's main checkout), machine and color.
+  keeping({ w, g }) {
     const path = g.folder ?? this.trees[g.repo]?.find((c) => c.main)?.path ?? g.top;
     const color = (shared("space.colors") ?? {})[w.id] ?? "ansi6";
-    setShared("projects.kept", [...this.kept.filter((k) => k.key !== g.repo),
-      { key: g.repo, name: g.name, initial: g.initial ?? null, folder: Boolean(g.folder), path, machine: w.machine ?? null, color, space: w.id }]);
+    return { key: g.repo, name: g.name, initial: g.initial ?? null, folder: Boolean(g.folder), path, machine: w.machine ?? null, color, space: w.id };
   }
 
   // × forgets a project; an open one also closes its spaces, and Herdr asks before each.
   dismiss({ g, closed }) {
+    if (g.scratch) { for (const id of shared("projects.scratch") ?? []) run("space.close", { id }); return; }
     setShared("projects.kept", this.kept.filter((k) => k.key !== g.repo));
     if (closed) return;
     const ps = panes();
@@ -509,7 +600,7 @@ export default class Spaces extends View {
   projectRow(r, t, first) {
     const { w, g, count, closed } = r;
     const id = `repo-${g.repo}`, lit = this.hovered === id, folded = !closed && this.foldedRepos.has(g.repo);
-    const fill = this.fill(w, t, closed?.color), isKept = Boolean(closed) || this.kept.some((k) => k.key === g.repo);
+    const fill = this.fill(w, t, closed?.color);
     const stop = (_e, cx) => cx.stop_propagation();
     const control = (key, icon, label, action) => div().id(`${id}-${key}`).size(20).flex_none().flex().items_center().justify_center().rounded(5)
       .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
@@ -518,24 +609,10 @@ export default class Spaces extends View {
       .on_click((_e, cx) => { cx.stop_propagation(); action(); })
       .child(svg(icon).size(13));
     const name = this.title(g), editing = this.renaming === g.repo;
-    const dragged = this.dragging === g.repo && this.dropOn && this.dropOn !== g.repo;
-    const target = this.dragging && this.dropOn === g.repo && this.dragging !== g.repo;
-    const down = target && this.projectKeys.indexOf(this.dragging) < this.projectKeys.indexOf(g.repo);
     return h_flex().id(id).relative().h(36).when(!first, el => el.mt(10)).flex_none().px(8).gap(10).items_center().rounded(8).font_weight(700)
       .role("button").accessibility_label(closed ? `Open ${name}` : folded ? `Expand ${name}` : `Collapse ${name}`)
       .on_hover((over, cx) => { if (over) this.hovered = id; else if (this.hovered === id) this.hovered = null; cx.notify(); })
-      // Drag a project's row onto another to move it there; the line shows where it lands.
-      .when(dragged, el => el.opacity(0.5))
-      .when(target, el => el.child(div().absolute().left(0).right(0).h(2).bg(t.accent).when(down, l => l.bottom(-4)).when(!down, l => l.top(-4))))
-      .on_mouse_down("left", () => { this.dragging = g.repo; this.dropOn = null; })
-      .on_mouse_move((_e, cx) => { if (this.dragging && this.dropOn !== g.repo) { this.dropOn = g.repo; cx.notify(); } })
-      .on_mouse_up("left", (_e, cx) => {
-        const from = this.dragging;
-        this.dragging = null; this.dropOn = null;
-        if (from && from !== g.repo) this.dropProject(from, g.repo);
-        cx.notify();
-      })
-      // A click opens a closed project or folds an open one; a double-click renames it (a drop, pressed elsewhere, isn't a click).
+      // A click opens a closed project or folds an open one; a double-click renames it.
       .on_click((e, cx) => {
         if (e.click_count === 2) { if (!closed) this.toggleRepo(g.repo, cx); this.startRename(g); cx.notify(); return; }
         if (closed) this.reopen(r); else this.toggleRepo(g.repo, cx);
@@ -556,15 +633,14 @@ export default class Spaces extends View {
         .on_key_down((e, cx) => { if (e.key === "escape") { cx.stop_propagation(); this.finishRename(false, cx); } })
         .child(Input.new(this.nameInput).w_full().h_full())))
       .when(folded, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(String(count))))
-      // The chevron, then on hover: pin keeps it here with nothing open; + adds a worktree (a space, for a folder);
+      // The chevron, then on hover: + adds a worktree (a space, for a folder);
       // × forgets it and closes what's open. Packed close so the name keeps its room.
       .child(h_flex().flex_none().gap(1).items_center()
       .when(!closed && (lit || folded), el => el.child(h_flex().size(22).flex_none().items_center().justify_center()
         .child(svg(`mods/metro-chrome/icons/chevron-${folded ? "right" : "down"}.svg`).size(14).text_color(lit ? t.foreground : t.dim))))
-      .when(lit && !closed && !editing, el => el.child(control("keep", `mods/metro-chrome/icons/${isKept ? "pin-off" : "pin"}.svg`, isKept ? "Stop keeping in the sidebar" : "Keep in the sidebar when closed",
-        () => isKept ? setShared("projects.kept", this.kept.filter((k) => k.key !== g.repo)) : this.keep(r))))
       .when(lit && !closed && !editing, el => el.child(control("new", "mods/metro-chrome/icons/plus.svg", g.folder ? "New space in this folder" : "New worktree (a new branch checkout)", () => {
-        if (g.folder) run("space.new", { folder: g.folder, ...(w.machine ? { machine: w.machine } : {}) });
+        if (g.scratch) run("metro-tabs.scratch");
+        else if (g.folder) run("space.new", { folder: g.folder, ...(w.machine ? { machine: w.machine } : {}) });
         else openOverlay({ mod: "metro-worktree", kind: "dialog", width: 600, height: 520, props: { space: w.id, action: "new" } });
       })))
       .when(lit, el => el.child(control("dismiss", "mods/metro-chrome/icons/close.svg", closed ? "Remove from the sidebar" : "Close this project's spaces (asks first)", () => this.dismiss(r)))));
@@ -637,31 +713,12 @@ export default class Spaces extends View {
       .role("button").accessibility_label(w.name)
       // The shown space is a white card, as the active tab and its terminal; hovered, it takes the outline too.
       .when(on && this.hovered !== `space-${w.id}`, (el) => el.bg(t.background).border_color(t.border))
-      .when(this.pressed === i && this.over !== i, (el) => el.opacity(0.5))
-      .when(this.pressed !== null && this.over === i && this.pressed !== i, (el) => el.child(
-        div().absolute().left(0).right(0).h(2).bg(t.accent)
-          .when(this.pressed < i, line => line.bottom(0))
-          .when(this.pressed > i, line => line.top(0)),
-      ))
-      .on_mouse_down("left", () => {
-        this.pressed = i;
-        this.over = i;
-      })
-      .on_mouse_move((_e, cx) => {
-        const source = spaces()[this.pressed];
-        const over = source && (source.machine ?? null) === (w.machine ?? null) ? i : null;
-        if (this.pressed !== null && this.over !== over) {
-          this.over = over;
-          cx.notify();
-        }
-      })
+      // A press and release on the same row shows it.
+      .on_mouse_down("left", () => { this.pressed = i; })
       .on_mouse_up("left", (_e, cx) => {
         const from = this.pressed;
-        const over = this.over;
         this.pressed = null;
-        this.over = null;
-        if (from !== null && over === i && from !== i) run("space.move", { id: spaces()[from].id, index: i + 1 });
-        else if (from === i) select(w);
+        if (from === i) select(w);
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
@@ -671,13 +728,26 @@ export default class Spaces extends View {
         : this.cornerClose(`space-${w.id}-close`, "Close space", t, () => run("space.close", { id: w.id }))));
   }
 
-  render() {
-    const t = theme();
+  // Shows every project at once in the work area (metro-overview), or the tabs again; lit while it shows.
+  overviewButton(t) {
+    const on = find(layout(), "view")?.active === "overview";
+    const label = on ? "Show tabs" : "Overview of every project";
+    return div().id("space-overview").size(26).flex_none().flex().items_center().justify_center().rounded(6)
+      .text_color(on ? t.foreground : t.dim).when(on, el => el.bg(t.background))
+      .hover(s => s.bg(on ? t.background : t.hover).text_color(t.foreground))
+      .role("button").accessibility_label(label).tooltip(label)
+      .on_click(() => run("layout.select", { stack: "view", child: on ? "main" : "overview" }))
+      .child(svg("mods/metro-chrome/icons/layout-grid.svg").size(14));
+  }
+
+  // Each space gets a color, the one least used so far; colors of spaces gone are dropped.
+  paint() {
     const palette = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
     const sp = spaces();
     const ids = new Set(sp.map(p => p.id));
     const kept = Object.fromEntries(Object.entries(shared("space.colors") ?? {}).filter(([id]) => ids.has(id)));
     let changed = Object.keys(kept).length !== Object.keys(shared("space.colors") ?? {}).length;
+    for (const id of shared("projects.scratch") ?? []) if (ids.has(id) && kept[id] !== "dim") { kept[id] = "dim"; changed = true; }
     for (const p of sp) {
       if (kept[p.id] || p.name === "~") continue;
       const uses = c => Object.values(kept).filter(v => v === c).length;
@@ -685,16 +755,25 @@ export default class Spaces extends View {
       changed = true;
     }
     if (changed) setShared("space.colors", kept);
+  }
+
+  render() {
+    const t = theme();
+    this.paint();
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       // Bold, as the agents list titles its sections, a size up as the heading of the half; the first project sits right under it.
       .child(h_flex().id("spaces-heading").mt(6).h(32).flex_none().pl(16).pr(10).items_center().justify_between().text_size(13).text_color(t.dim)
         .child(div().text_size(13).font_family(BOLD).font_weight(700).text_color(t.muted).child("Projects"))
+        .child(h_flex().gap(2).items_center()
+        .child(this.overviewButton(t))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).role("button").accessibility_label("New space").hover(s => s.bg(t.hover).text_color(t.foreground))
-          .on_click(() => run("space.new")).child(svg("mods/metro-chrome/icons/plus.svg").size(14))))
+          .on_click(() => run("space.new")).child(svg("mods/metro-chrome/icons/plus.svg").size(14)))))
       // The list scrolls beside an always-visible 10px bar on its right edge, 5px clear of it.
       .child(div().relative().flex_1().min_h(0)
         .child(v_flex().id("space-list").size_full().overflow_y_scroll()
-          .on_mouse_up("left", (_e, cx) => { this.pressed = null; this.dragging = null; this.dropOn = null; cx.notify(); })
+          .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
+          // Clicking a row doesn't move it from under the pointer: the order catches up once the pointer leaves.
+          .on_hover((over, cx) => { this.inList = over; if (!over) cx.notify(); })
           .child(v_flex().id("space-content").w_full().flex_none().pl(8).pr(15).pb(8)
             .children(this.grouped(t))))
         .child(div().absolute().top(0).bottom(0).right(0).w(10).child(Scrollbar.vertical("space-list").size_full().mode("always"))));

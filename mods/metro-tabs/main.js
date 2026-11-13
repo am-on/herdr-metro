@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, focused, run, hc, openOverlay, theme, window, layout, settings, nextCommand, shared } from "herdr";
+import { spaces, panes, agents, terminals, focused, run, hc, openOverlay, theme, window, layout, settings, nextCommand, shared, setShared, home } from "herdr";
 import { namer } from "./name.js";
 import { lookup, staleness, prColor, issueColor, open } from "./github.js";
 
@@ -44,9 +44,10 @@ const mark = (t, s) => s === "working" ? breathing(t.ansi2)
   : div().size(7).flex_none().rounded_full().bg(t.done);
 
 // The work area is a stack in the layout: the active tab ("main"), one agent full size ("agent"), or the pull
-// requests ("prs", metro-prs).
+// requests ("prs", metro-prs) or every project at once ("overview", metro-overview).
 const agentView = () => find(layout(), "view")?.active === "agent";
 const prsView = () => find(layout(), "view")?.active === "prs";
+const overviewView = () => find(layout(), "view")?.active === "overview";
 const showTabs = () => run("layout.select", { stack: "view", child: "main" });
 const switchView = () => run("layout.select", { stack: "view", child: agentView() ? "main" : "agent" });
 
@@ -66,13 +67,31 @@ export default class Tabs extends View {
     // since and for new commits on origin's default branch.
     this.gh = new Map();
     cx.timer.every(180000, (cx) => { if (this.at) this.fetchGh(this.at, cx); });
-    // `metro-tabs.view` (cmd-shift-a in keys.json) switches between the tabs and the agent view.
+    // `metro-tabs.view` (cmd-shift-a in keys.json) switches between the tabs and the agent view; `metro-tabs.overview`
+    // (cmd-p) opens and closes the overview of every project; `metro-tabs.scratch` (cmd-n) opens a one-off terminal.
     cx.spawn(async (cx) => {
       for (;;) {
-        if (await nextCommand() === "view" && find(layout(), "view")) switchView();
+        const c = await nextCommand();
+        if (c === "view" && find(layout(), "view")) switchView();
+        if (c === "overview" && find(layout(), "view")) run("layout.select", { stack: "view", child: overviewView() ? "main" : "overview" });
+        if (c === "scratch") this.scratch(cx);
         cx.notify();
       }
     });
+  }
+
+  // A one-off terminal in a space of its own, at home, listed under Scratch (shared `projects.scratch`) wherever it
+  // goes. `space.new` doesn't say which space it made: the one that wasn't there before is it.
+  scratch(cx) {
+    const before = new Set(spaces().map((s) => s.id));
+    run("layout.select", { stack: "view", child: "main" });
+    run("space.new", { folder: home() });
+    const look = (cx, tries) => cx.timer.after(100, (cx) => {
+      const made = spaces().find((s) => !before.has(s.id));
+      if (made) setShared("projects.scratch", [...(shared("projects.scratch") ?? []), made.id]);
+      else if (tries > 0) look(cx, tries - 1);
+    });
+    look(cx, 30);
   }
 
   // Where the PR and issues links point: the focused pane's checkout, else the tab's first terminal's, else one
@@ -187,6 +206,13 @@ export default class Tabs extends View {
       .child(div().truncate().child("Pull requests"));
   }
 
+  // In the overview the bar names it; the sidebar's button and the one here lead back.
+  overviewBar(t) {
+    return h_flex().id("overview-bar").flex_1().min_w(0).h(28).px(8).gap(8).items_center().text_size(13).text_color(t.foreground)
+      .child(svg("mods/metro-chrome/icons/layout-grid.svg").size(14).flex_none().text_color(t.muted))
+      .child(div().truncate().child("Projects"));
+  }
+
   render(cx) {
     const t = theme();
     const space = spaces().find(p => p.active);
@@ -210,8 +236,8 @@ export default class Tabs extends View {
         run("pane.focus", { pane: plain.pane });
       } else if (moved && f.agent !== moved.terminal) run("agent.focus", { terminal: moved.terminal });
     }
-    // The pull requests view gives way to the tabs as soon as a pane is focused or opened in this space.
-    if (prsView() && (moved || fresh.some(p => here.has(p.tab)))) showTabs();
+    // The pull requests view and the overview give way to the tabs as soon as a pane is focused or opened in this space.
+    if ((prsView() || overviewView()) && (moved || fresh.some(p => here.has(p.tab)))) showTabs();
     const stop = (_e, cx) => cx.stop_propagation();
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
@@ -281,15 +307,15 @@ export default class Tabs extends View {
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? (agentView() ? "agent.prev" : "tab.prev") : (agentView() ? "agent.next" : "tab.next")); })
       .when(Boolean(sidebar?.hidden), el => el.child(this.sidebarToggle(t, stop)))
-      .child(agentView() ? this.agentBar(t, title, live) : prsView() ? this.prsBar(t)
+      .child(agentView() ? this.agentBar(t, title, live) : prsView() ? this.prsBar(t) : overviewView() ? this.overviewBar(t)
         // The + follows the last tab; the tabs scroll and it stays in view.
         : h_flex().flex_1().min_w(0).h_full().items_center()
           .child(h_flex().id("tab-scroll").min_w(0).h_full().border_l(1).border_color(t.border).overflow_x_scroll().children(shown.map(item)))
           .child(button("tab-add", svg("mods/metro-chrome/icons/plus.svg").size(14), () => openOverlay({ mod: "metro-new-tab", kind: "popup", width: 220, height: 160, props: { space: space?.id } }))
             .ml(6).role("button").accessibility_label("New tab")))
-      .children(prsView() ? [] : this.githubLinks(t, stop, cx))
+      .children(prsView() || overviewView() ? [] : this.githubLinks(t, stop, cx))
       // The agent view is reached only by its key; while it shows, a button leads back to the tabs.
-      .when(agentView() || prsView(), el => el.child(button("view-toggle", svg("mods/metro-chrome/icons/layers.svg").size(14), prsView() ? showTabs : switchView)
+      .when(agentView() || prsView() || overviewView(), el => el.child(button("view-toggle", svg("mods/metro-chrome/icons/layers.svg").size(14), agentView() ? switchView : showTabs)
         .role("button").accessibility_label("Show tabs")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/metro-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/metro-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))

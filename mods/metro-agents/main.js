@@ -455,9 +455,9 @@ export default class Agents extends View {
           cx.notify();
         })
         // agent.focus, not pane.focus: in tabs it focuses the pane, and it picks what the agent view shows.
-        // The pull requests view gives way to the tabs.
+        // The pull requests view and the overview give way to the tabs.
         .on_click(() => {
-          if (find(layout(), "view")?.active === "prs") run("layout.select", { stack: "view", child: "main" });
+          if (["prs", "overview"].includes(find(layout(), "view")?.active)) run("layout.select", { stack: "view", child: "main" });
           run("agent.focus", { terminal: a.address });
         })
         .child(h_flex().w_full().min_w(0).gap(10).items_center()
@@ -533,7 +533,7 @@ export default class Agents extends View {
           cx.notify();
         })
         .on_click(() => {
-          if (find(layout(), "view")?.active === "prs") run("layout.select", { stack: "view", child: "main" });
+          if (["prs", "overview"].includes(find(layout(), "view")?.active)) run("layout.select", { stack: "view", child: "main" });
           run("tab.select", { id: p.tab });
           run("pane.focus", { pane: p.pane });
         })

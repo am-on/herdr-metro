@@ -14,6 +14,8 @@ A layout for the [Herdr app](https://herdr.dev) for running many coding agents a
 
 ![The + menu under the tab bar: Terminal, Claude Code, Codex and Review changes](docs/new-tab.png)
 
+**Every project at once.** The grid button above the sidebar, or cmd-p, swaps the work area for a card per project: each worktree, open or not, with its branch, what's not pushed or committed, and its tabs with their agents' state. The worktrees you showed last sit in a row on top. Drag cards to arrange them, double-click a name to rename it, click a worktree or tab to go there. A worktree whose pull request merged says so, with a button to remove it.
+
 **Pull requests, yours and the ones waiting on you.** A button above the sidebar, with a blue dot while a review request is new, swaps the work area for every open pull request you wrote and every one asking for your review, across GitHub. Each shows who reviewed as avatars badged approved, changes requested or commented; select one to mark it seen and see whose approval it still needs, its checks and conversation, open it on GitHub, or review its changes in a worktree with a review tab. An optional rule says whose approvals a repo needs ("ana, and bo or cy"), and shows Approved or 1 of 2.
 
 **Review before you merge.** **+ → Review changes** opens the diff as GitHub draws it: uncommitted, the last commit, or the whole branch. Search every changed line and see the matches file by file, as Zed's project search does, with next and previous. Comment on a line, a range or a hunk; comments stay in place while the agent keeps changing the file. Send them to an agent already in that project, or start a new Claude Code or Codex with them as its first message.
