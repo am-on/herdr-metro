@@ -9,7 +9,7 @@
 // opens a worktree on a branch named after the selected one.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
-import { run, spaces, panes, shared, setShared, nextCommand, settings, home, pickFolder, layout, notify, knownAgents } from "herdr";
+import { run, spaces, panes, shared, setShared, nextCommand, settings, home, pickFolder, layout, notify, knownAgents, agents, hc } from "herdr";
 import { pulls, conversation, checkouts, checkout, clone, exists, nearby, renamed, sameRepo, open, approval, approvalRules, cachedAvatars, fetchAvatars, avatarFile, avatarKey, updates,
   COLUMNS, boards, issues, issueConversation, branchName, issueBranches, start, assign, moveToInProgress } from "./github.js";
 
@@ -49,6 +49,9 @@ function find(node, id) {
   }
   return null;
 }
+// The Claude Code agent of a space to hand work to: one that isn't working first, then the latest active.
+const claudeIn = (space) => agents().filter((a) => a.space === space && /claude/i.test(a.app ?? ""))
+  .sort((a, b) => (a.status === "working") - (b.status === "working") || b.seq - a.seq)[0] ?? null;
 const tilde = (path) => (path.startsWith(home()) ? `~${path.slice(home().length)}` : path);
 // The colors metro-spaces deals out to projects.
 const COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
@@ -117,6 +120,8 @@ export default class Prs extends View {
     this.found = {}; // issue URL -> { branches, base }: what its checkout has for it
     this.typing = false;
     this.boardBusy = {}; // issue URL -> "assign" or "move" while it changes on GitHub
+    this.claudeBusy = {}; // pull request URL -> "fix" or "address" while it's handed to Claude
+    this.claudeErrors = {}; // pull request URL -> why it couldn't be
     // How Claude Code starts here: programs.json's, else plain `claude`.
     this.claudeRun = ["claude"];
     cx.spawn(async () => { try { this.claudeRun = (await knownAgents()).find((a) => a.key === "claude")?.run ?? this.claudeRun; } catch {} });
@@ -158,6 +163,69 @@ export default class Prs extends View {
     const folders = new Set(spaces().filter((s) => !s.machine).map(place).filter(Boolean));
     for (const k of shared("projects.kept") ?? []) if (!k.machine && !k.folder && k.path) folders.add(k.path);
     return [...folders];
+  }
+
+  // Hands work on one of your pull requests to Claude Code in its worktree: the space's agent gets `task` pasted, else
+  // Claude starts there on it, in a new tab, or in a new space for the worktree, made when there's none.
+  askClaude(pr, what, task, cx) {
+    if (this.claudeBusy[pr.url]) return;
+    this.claudeBusy[pr.url] = what;
+    delete this.claudeErrors[pr.url];
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const repo = pr.repo.toLowerCase();
+        if (!this.repos[repo]) this.repos = await checkouts(this.folders());
+        const main = this.repos[repo] ??= await renamed(pr.repo, this.repos);
+        if (!main) throw new Error(`${pr.repo} isn't in your projects yet. Click Review locally to bring it here, then try again.`);
+        const { path } = await start(main, pr.headRefName);
+        const s = spaceAt(path), agent = s && claudeIn(s.id);
+        if (agent) {
+          const r = await hc(["send", agent.address, task]);
+          if (r.code !== 0) throw new Error(`Couldn't send it to Claude in ${s.name}: ${(r.stderr || r.stdout).trim() || `hc send exited with ${r.code}`}. Check the agent is still running, then try again.`);
+          notify({ title: `Sent #${pr.number} to Claude`, body: `In ${s.name}. Click to watch it work.`, level: "success", action: { name: "agent.focus", args: { terminal: agent.address } } });
+        } else {
+          const claude = { argv: this.claudeRun, task };
+          if (s) run("tab.new", { space: s.id, folder: path, ...claude });
+          else run("space.new", { folder: path, ...claude });
+          notify({ title: `Started Claude Code on #${pr.number}`, body: s ? `In a new tab of ${s.name}.` : "In a new space for its worktree.", level: "success" });
+        }
+      } catch (e) {
+        this.claudeErrors[pr.url] = `${e.message ?? e}`;
+      }
+      delete this.claudeBusy[pr.url];
+      cx.notify();
+    });
+  }
+
+  // What Claude is told about failing checks: which, and how to read why.
+  fixTask(pr, d) {
+    const failing = (d.checks ?? []).filter((c) => FAILED.includes(c.state));
+    const runs = [...new Set(failing.map((c) => /\/actions\/runs\/(\d+)/.exec(c.url ?? "")?.[1]).filter(Boolean))];
+    const read = [`\`gh pr checks ${pr.number} --repo ${pr.repo}\``, ...runs.map((r) => `\`gh run view ${r} --log-failed --repo ${pr.repo}\``)];
+    return `Checks failed on pull request #${pr.number}, ${pr.url}: ${failing.map((c) => c.name).join(", ") || "see the checks"}. Read why with ${or(read)}, fix the cause on this branch, and tell me what you changed.`;
+  }
+
+  // What Claude is told about requested changes: each such review with its comments on files, and how to read the rest.
+  addressTask(pr, d) {
+    const asking = new Set(pr.reviewers.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.login));
+    const reviews = (d.events ?? []).filter((e) => e.kind === "review" && e.state === "CHANGES_REQUESTED" && asking.has(e.login))
+      .filter((e, i, all) => all.findIndex((x) => x.login === e.login) === i);
+    const parts = reviews.map((e) => [`### ${e.login}`, e.body || "(no summary)",
+      ...e.inline.map((c) => `${c.path}${c.line ? `:${c.line}` : ""}\n${c.body}`),
+      ...(e.more ? [`and ${e.more} more comments on files`] : [])].join("\n\n"));
+    return `${or([...asking])} requested changes on pull request #${pr.number}, ${pr.url}. Where a comment asks a question, answer it and change nothing; change code only where a comment asks for a change. For everything said, read \`gh pr view ${pr.number} --repo ${pr.repo} --comments\` and \`gh api repos/${pr.repo}/pulls/${pr.number}/comments\`, then tell me what you changed.${parts.length ? `\n\n${parts.join("\n\n")}` : ""}`;
+  }
+
+  // A plain pill button with Claude's logo that hands something to Claude; it says Sending… while it does, at its width.
+  claudeButton(t, pr, what, label, task, tip) {
+    const busy = this.claudeBusy[pr.url] === what;
+    return this.button(t, `claude-${what}`, busy ? "Sending…" : label, image(ICON("claude")).size(15), (cx) => this.askClaude(pr, what, task(), cx), tip)
+      .min_w(190).justify_center();
+  }
+
+  isMine(pr) {
+    return Boolean(this.data?.mine.some((p) => p.url === pr.url));
   }
 
   // Claude Code's first message when it's started on an issue.
@@ -760,7 +828,7 @@ export default class Prs extends View {
 
   // Who has to approve and who did, in one section of the header card: the rule's groups first (who approved for each, or who is still
   // required), then everyone else who reviewed, commented or was asked.
-  reviewStatus(t, pr) {
+  reviewStatus(t, pr, d) {
     const a = approval(pr, this.rules);
     const ruled = new Set(a ? a.need.flat() : []);
     const verdictColor = (s) => (s === "APPROVED" ? t.ansi2 : s === "CHANGES_REQUESTED" ? t.blocked : t.dim);
@@ -782,9 +850,13 @@ export default class Prs extends View {
     const approved = pr.reviewers.filter((r) => r.state === "APPROVED").length;
     const pill = a ? this.summaryPill(t, `${a.n} of ${a.of}`, a.level === "full" ? t.ansi2 : null)
       : approved ? this.summaryPill(t, `${approved} ${approved === 1 ? "approval" : "approvals"}`, t.ansi2) : null;
+    // On your own pull request, requested changes can go to Claude in its worktree.
+    const asked = this.isMine(pr) && pr.reviewers.some((r) => r.state === "CHANGES_REQUESTED");
     return v_flex().id("review-status").w_full().min_w(0).gap(10)
       .child(this.cardHead(t, "Review status", pill))
-      .children(rows.length ? rows : [div().text_size(13.5).text_color(t.dim).child("No reviews yet.")]);
+      .children(rows.length ? rows : [div().text_size(13.5).text_color(t.dim).child("No reviews yet.")])
+      .when(asked, (el) => el.child(h_flex().pt(2).child(this.claudeButton(t, pr, "address", "Address with Claude", () => this.addressTask(pr, d),
+        "Send the requested changes to Claude Code in this branch's worktree"))));
   }
 
   // The checks, when the pull request has any (the list knows its overall state, so the section and its label are
@@ -815,7 +887,10 @@ export default class Prs extends View {
         .child(div().text_color(t.dim).child(String(c.state).toLowerCase().replace(/_/g, " ")))))
       .when(Boolean(counted), (el) => el.child(h_flex().id("check-passed").min_h(24).gap(10).items_center().text_size(13.5)
         .children([this.ci(t, passed ? "SUCCESS" : "SKIPPED", 15)].filter(Boolean))
-        .child(div().text_color(t.foreground).child(counted))));
+        .child(div().text_color(t.foreground).child(counted))))
+      // On your own pull request, failing checks can go to Claude in its worktree.
+      .when(failed > 0 && this.isMine(pr), (el) => el.child(h_flex().pt(2).child(this.claudeButton(t, pr, "fix", "Fix with Claude", () => this.fixTask(pr, d),
+        "Ask Claude Code in this branch's worktree to find out why the checks fail and fix it"))));
   }
 
   event(t, e, i) {
@@ -900,14 +975,15 @@ export default class Prs extends View {
         .child(div().text_color(t.ansi2).child(`+${thousands(pr.additions)}`))
         .child(div().text_color(t.blocked).child(`−${thousands(pr.deletions)}`)))
       .child(div().mt(18).h(1).w_full().bg(t.rule))
-      .child(div().mt(16).child(this.reviewStatus(t, pr)))
+      .child(div().mt(16).child(this.reviewStatus(t, pr, d)))
       .children(pr.ci ? [div().mt(18).child(this.checksCard(t, pr, d))] : [])
       .child(h_flex().mt(20).gap(10).items_center()
         // A fixed width, so "Checking out…" doesn't change its size.
         .child(this.button(t, "check-out", setup?.busy === "clone" ? "Cloning…" : busy ? "Checking out…" : "Review locally", "git-pull-request", (cx) => this.checkOut(pr, cx), "Check it out in a worktree and open a Review tab", true).min_w(176).justify_center()))
       .when(Boolean(setup), (el) => el.child(this.setupCard(t, pr, setup)))
       .when(Boolean(error), (el) => el.child(div().mt(10).text_size(13).text_color(t.blocked).child(error)))
-      .when(Boolean(warning), (el) => el.child(div().mt(10).text_size(13).text_color(t.working).child(`Couldn't update your checkout. ${warning.why} ${warning.next}`)));
+      .when(Boolean(warning), (el) => el.child(div().mt(10).text_size(13).text_color(t.working).child(`Couldn't update your checkout. ${warning.why} ${warning.next}`)))
+      .when(Boolean(this.claudeErrors[pr.url]), (el) => el.child(div().mt(10).text_size(13).text_color(t.blocked).child(this.claudeErrors[pr.url])));
 
     return this.page(t, pr, v_flex().w_full().max_w(900).px(24).pt(20).pb(40).gap(14)
       .child(header)

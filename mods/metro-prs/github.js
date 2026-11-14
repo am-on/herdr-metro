@@ -27,7 +27,7 @@ const DETAIL = `query($owner: String!, $name: String!, $number: Int!) {
       comments(first: 10) { totalCount nodes { path line originalLine body } } } }
     comments(last: 30) { totalCount nodes { body createdAt url author { login avatarUrl(size: 64) } } }
     commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 50) { nodes {
-      ... on CheckRun { name conclusion status } ... on StatusContext { context state } } } } } } }
+      ... on CheckRun { name conclusion status detailsUrl } ... on StatusContext { context state targetUrl } } } } } } }
   } }
 }`;
 
@@ -90,7 +90,7 @@ export async function conversation(pr) {
         more: r.comments.totalCount - r.comments.nodes.length })),
   ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   const roll = p.commits.nodes[0]?.commit.statusCheckRollup;
-  const checks = (roll?.contexts.nodes ?? []).map((c) => ({ name: c.name ?? c.context, state: c.conclusion ?? c.state ?? c.status ?? "PENDING" }));
+  const checks = (roll?.contexts.nodes ?? []).map((c) => ({ name: c.name ?? c.context, state: c.conclusion ?? c.state ?? c.status ?? "PENDING", url: c.detailsUrl ?? c.targetUrl ?? null }));
   return { events, checks };
 }
 
