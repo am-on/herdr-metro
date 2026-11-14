@@ -74,3 +74,18 @@ export const prColor = (pr, t) => pr.isDraft && pr.state === "OPEN" ? t.dim : pr
 export const issueColor = (issue, t) => issue.state === "OPEN" ? t.ansi2 : issue.stateReason === "NOT_PLANNED" ? t.dim : t.ansi5;
 
 export const open = (url) => exec("open", [url]).catch(() => {});
+
+// Opens a draft pull request for the branch checked out at cwd, titled and described from its first commit, pushing
+// the branch first when it has no upstream. Resolves with the pull request's URL; throws what went wrong.
+export async function openDraft(cwd, machine, branch) {
+  const git = (args) => exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5", "git", ...overHttps(machine), ...args], { cwd, on: machine });
+  const why = (r) => (r.stderr || r.stdout || "").trim().split("\n").filter(Boolean).pop()?.replace(/^(error|fatal): /, "") ?? "";
+  const up = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+  if (up.code !== 0) {
+    const push = await git(["push", "--quiet", "-u", "origin", "HEAD"]);
+    if (push.code !== 0) throw new Error(`Couldn't push ${branch}: ${why(push)}. Push it from a terminal, then try again.`);
+  }
+  const r = await exec("gh", ["pr", "create", "--draft", "--fill-first", "--head", branch], { cwd, on: machine });
+  if (r.code !== 0) throw new Error(`Couldn't open a draft pull request: ${why(r)}. Try again, or open it on GitHub.`);
+  return r.stdout.trim().split("\n").pop();
+}

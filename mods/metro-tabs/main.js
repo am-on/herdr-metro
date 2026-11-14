@@ -1,8 +1,12 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, focused, run, hc, openOverlay, theme, window, layout, settings, nextCommand, shared, setShared, home } from "herdr";
+import { spaces, panes, agents, terminals, focused, run, hc, openOverlay, theme, window, layout, settings, nextCommand, shared, setShared, home, knownAgents, notify } from "herdr";
 import { namer } from "./name.js";
-import { lookup, staleness, prColor, issueColor, open } from "./github.js";
+import { lookup, staleness, prColor, issueColor, open, openDraft } from "./github.js";
+
+// The Claude Code agent of a space to hand work to: one that isn't working first, then the latest active.
+const claudeIn = (space) => agents().filter((a) => a.space === space && /claude/i.test(a.app ?? ""))
+  .sort((a, b) => (a.status === "working") - (b.status === "working") || b.seq - a.seq)[0] ?? null;
 
 // Mod panes have no program; these ones get an icon of their own.
 const MOD_PROGRAMS = { "metro-review": { name: "Review", icon: "mods/metro-chrome/icons/git-compare.svg", tint: true } };
@@ -66,6 +70,10 @@ export default class Tabs extends View {
     // GitHub facts per checkout and branch; the shown one is looked up again every three minutes, for a PR opened
     // since and for new commits on origin's default branch.
     this.gh = new Map();
+    this.ghBusy = null; // "draft" while a draft pull request opens
+    // How Claude Code starts here: programs.json's, else plain `claude`.
+    this.claudeRun = ["claude"];
+    cx.spawn(async () => { try { this.claudeRun = (await knownAgents()).find((a) => a.key === "claude")?.run ?? this.claudeRun; } catch {} });
     cx.timer.every(180000, (cx) => { if (this.at) this.fetchGh(this.at, cx); });
     // `metro-tabs.view` (cmd-shift-a in keys.json) switches between the tabs and the agent view; `metro-tabs.overview`
     // (cmd-p) opens and closes the overview of every project; `metro-tabs.scratch` (cmd-n) opens a one-off terminal;
@@ -115,7 +123,7 @@ export default class Tabs extends View {
     const cwd = pane?.cwd ?? space?.folder, branch = pane?.branch ?? space?.branch;
     if (!cwd || !branch) return null;
     const machine = space?.machine ?? null;
-    return { cwd, branch, machine, key: `${machine}|${cwd}|${branch}` };
+    return { cwd, branch, machine, space: space?.id ?? null, key: `${machine}|${cwd}|${branch}` };
   }
 
   fetchGh(at, cx) {
@@ -127,6 +135,37 @@ export default class Tabs extends View {
         staleness(at.cwd, at.machine, at.branch).catch(() => null),
       ]);
       this.gh.set(at.key, { ...found, stale });
+      cx.notify();
+    });
+  }
+
+  // Asks the space's Claude Code to rebase onto origin's default branch with the /re-main skill; with no Claude there,
+  // starts one on it in a new tab.
+  rebase(at) {
+    const agent = at.space && claudeIn(at.space);
+    if (!agent) {
+      run("tab.new", { ...(at.space ? { space: at.space } : {}), folder: at.cwd, argv: this.claudeRun, task: "/re-main" });
+      return notify({ title: "Started Claude Code to rebase", body: `${at.branch}, in a new tab.`, level: "success" });
+    }
+    hc(["send", agent.address, "/re-main"]).then((r) => notify(r.code === 0
+      ? { title: "Asked Claude to rebase", body: `${at.branch}. Click to watch it work.`, level: "success", action: { name: "agent.focus", args: { terminal: agent.address } } }
+      : { title: "Couldn't ask Claude to rebase", body: "Check the agent is still running, then try again.", level: "warning" })).catch(() => {});
+  }
+
+  // Opens a draft pull request for the shown branch; the tab bar then links it.
+  draft(at, cx) {
+    if (this.ghBusy) return;
+    this.ghBusy = "draft";
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const url = await openDraft(at.cwd, at.machine, at.branch);
+        notify({ title: "Opened a draft pull request", body: url, level: "success" });
+        this.gh.delete(at.key);
+      } catch (e) {
+        notify({ title: "Couldn't open a draft pull request", body: `${e.message ?? e}`, level: "warning" });
+      }
+      this.ghBusy = null;
       cx.notify();
     });
   }
@@ -158,11 +197,24 @@ export default class Tabs extends View {
         .tooltip(`origin/${behind.base} has ${commits(behind.behind)} this branch doesn't: rebase onto it`)
         .child(svg("mods/metro-chrome/icons/git-compare.svg").size(14).flex_none().text_color(t.working))
         .child(div().text_color(t.muted).child(`${behind.behind} behind ${behind.base}`)),
+      behind && h_flex().id("gh-rebase").h(26).px(8).flex_none().items_center().rounded(6).text_size(12).cursor_pointer()
+        .text_color(t.muted).border(1).border_color(t.border).hover(s => s.bg(t.hover).text_color(t.foreground))
+        .role("button").accessibility_label(`Ask Claude to rebase onto origin/${behind.base}`).tooltip(`Ask Claude Code here to rebase onto origin/${behind.base} (/re-main)`)
+        .on_mouse_down("left", stop).on_click(() => this.rebase(at))
+        .child("Rebase"),
       pr && link("gh-pr", pr.url, `Pull request #${pr.number}: ${pr.title}${review ? `. ${pr.review.who}` : ""}`)
         .tooltip(review ? `#${pr.number} ${pr.title}\n${pr.review.who}` : `#${pr.number} ${pr.title}`)
         .child(svg("mods/metro-chrome/icons/github.svg").size(14).flex_none().text_color(prColor(pr, t)))
         .child(div().text_color(t.muted).child(`#${pr.number}`))
         .when(Boolean(review), el => el.child(svg(review.icon).size(12).flex_none().text_color(review.color))),
+      // A branch without a pull request, other than the default one, can open a draft.
+      !pr && !loading && repo && stale?.base && at.branch !== stale.base && !/^pr\//.test(at.branch) && h_flex().id("gh-draft").h(26).px(8).gap(6).flex_none().min_w(118)
+        .items_center().justify_center().rounded(6).text_size(12).cursor_pointer()
+        .text_color(t.muted).border(1).border_color(t.border).hover(s => s.bg(t.hover).text_color(t.foreground))
+        .role("button").accessibility_label("Open a draft pull request").tooltip(`Open a draft pull request for ${at.branch}, from its first commit`)
+        .on_mouse_down("left", stop).on_click((_e, cx) => this.draft(at, cx))
+        .child(svg("mods/metro-chrome/icons/git-pull-request-draft.svg").size(13).flex_none())
+        .child(this.ghBusy === "draft" ? "Opening…" : "Open draft PR"),
       issue && link("gh-issue", issue.url, `Issue #${issue.number}: ${issue.title}`)
         .child(svg("mods/metro-chrome/icons/circle-dot.svg").size(14).flex_none().text_color(issueColor(issue, t)))
         .child(div().text_color(t.muted).child(`#${issue.number}`)),
