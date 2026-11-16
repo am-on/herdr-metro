@@ -283,14 +283,22 @@ export default class Review extends View {
     else {
       this.viewed[k] = `${f.add}/${f.del}`;
       // Done with the open file: on to the next one not viewed yet.
-      if (this.open === f.path) {
-        const i = this.files.findIndex((x) => x.path === f.path);
-        const next = [...this.files.slice(i + 1), ...this.files.slice(0, i)].find((x) => !this.isViewed(x));
-        if (next) this.pick(next.path, cx);
-      }
+      if (this.open === f.path) this.pickNext(f, cx);
     }
     localStorage.setItem("viewed", JSON.stringify(this.viewed));
     cx.notify();
+  }
+
+  pickNext(f, cx) {
+    const i = this.files.findIndex((x) => x.path === f.path);
+    const next = [...this.files.slice(i + 1), ...this.files.slice(0, i)].find((x) => !this.isViewed(x));
+    if (next) this.pick(next.path, cx);
+  }
+
+  // Enter on the open file: it is viewed, and the next file not viewed yet opens.
+  viewAndNext(f, cx) {
+    if (this.isViewed(f)) this.pickNext(f, cx);
+    else this.toggleViewed(f, cx);
   }
 
   checkbox(id, on, t, toggle) {
@@ -1013,7 +1021,7 @@ export default class Review extends View {
         const parts = f.path.split("/"), name = parts.pop(), n = counts.get(f.path), seen = this.isViewed(f), hits = found?.get(f.path);
         return h_flex().id(`file-${f.path}`).h(28).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
           .when(this.open === f.path, (e) => e.bg(t.selected)).when(this.open !== f.path, (e) => e.hover((s) => s.bg(t.hover)))
-          .on_click((_e, cx) => { this.showResults = false; this.jumpToFirst(f.path); this.pick(f.path, cx); cx.notify(); })
+          .on_click((_e, cx) => { this.showResults = false; this.jumpToFirst(f.path); this.pick(f.path, cx); this.handle.focus(); cx.notify(); })
           .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(f); })
           .child(div().w(12).flex_none().text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().min_w(0).truncate().text_color(t.dim).child(parts.length ? parts.join("/") + "/" : ""))
@@ -1038,6 +1046,7 @@ export default class Review extends View {
         .on_click((_e, cx) => { this.showResults = true; this.step(0, cx); })
         .child(svg("mods/metro-chrome/icons/search.svg").size(12)).child("All matches")))
       .child(h_flex().id("viewed-toggle").gap(6).items_center().cursor_pointer().text_size(12).text_color(t.muted)
+        .tooltip("Enter marks it viewed and opens the next file")
         .on_click((_e, cx) => this.toggleViewed(openFile, cx))
         .child(this.checkbox("viewed-open", this.isViewed(openFile), t, (cx) => this.toggleViewed(openFile, cx)))
         .child("Viewed")) : null;
@@ -1107,6 +1116,7 @@ export default class Review extends View {
         if (e.key === "escape" && this.editing) { cx.stop_propagation(); this.closeEditor(cx); }
         else if (e.keystroke === "cmd-f") { cx.stop_propagation(); this.search.focus(); }
         else if (e.keystroke === "cmd-g" || e.keystroke === "cmd-shift-g") { cx.stop_propagation(); this.step(e.modifiers.shift ? -1 : 1, cx); }
+        else if (e.keystroke === "enter" && openFile && !resultList && !this.editing && !this.searchFocused) { cx.stop_propagation(); this.viewAndNext(openFile, cx); }
       })
       .on_mouse_move((e, cx) => {
         if (!this.drag) return;
