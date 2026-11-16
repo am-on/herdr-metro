@@ -1,7 +1,7 @@
 // Every project at once, in the work area: the worktrees last shown, then a card per project where the person placed
 // it, in it a box per worktree (open or not), and in each open one the tabs it has, with their agents' state. The
-// projects, their checkouts, names and colors are the sidebar's (metro-spaces publishes them in shared
-// `projects.tree`); tabs and states are live from Herdr.
+// projects, their checkouts, names and colors come from metro-projects (shared `projects.tree`); tabs and states
+// are live from Herdr.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { spaces, panes, agents, terminals, run, openOverlay, pickFolder, theme, shared, setShared, layout, settings, exec, home, appHome, readTextFile, knownAgents } from "herdr";

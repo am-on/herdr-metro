@@ -53,7 +53,7 @@ function find(node, id) {
 const claudeIn = (space) => agents().filter((a) => a.space === space && /claude/i.test(a.app ?? ""))
   .sort((a, b) => (a.status === "working") - (b.status === "working") || b.seq - a.seq)[0] ?? null;
 const tilde = (path) => (path.startsWith(home()) ? `~${path.slice(home().length)}` : path);
-// The colors metro-spaces deals out to projects.
+// The colors metro-projects deals out to projects.
 const COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 
 const ago = (iso) => {

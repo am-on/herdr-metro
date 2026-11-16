@@ -1,6 +1,6 @@
 // Lines in a checkout's untracked files, as `grep -cHI ''` counts them (a binary file has none). Each file's count is
 // kept with its size and modification time in the machine's cache folder (~/.cache/herdr-metro/untracked), so a look
-// reads only the files that are new or changed since. The same in metro-spaces and metro-review.
+// reads only the files that are new or changed since. The same in metro-projects and metro-review.
 import { exec } from "herdr";
 
 const SCRIPT = String.raw`

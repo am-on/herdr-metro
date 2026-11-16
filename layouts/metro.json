@@ -195,6 +195,16 @@
                 "mod": "metro-clocks"
               },
               "children": []
+            },
+            {
+              "id": "projects",
+              "type": "block",
+              "size": {
+                "px": 0
+              },
+              "content": {
+                "mod": "metro-projects"
+              }
             }
           ]
         }

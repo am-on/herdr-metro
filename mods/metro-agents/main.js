@@ -83,8 +83,8 @@ function icon(p, size, color) {
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
 
-// At the right of a branch, what isn't on origin, as metro-spaces draws it (it runs git and shares each space's
-// in `projects.git`): commits to push and to pull in the text's grey, then the uncommitted lines in green and red.
+// At the right of a branch, what isn't on origin, as metro-spaces draws it (metro-projects runs git and shares each
+// space's in `projects.git`): commits to push and to pull in the text's grey, then the uncommitted lines in green and red.
 function gitMarks(t, g, id) {
   const n = (k, one) => `${k} ${k === 1 ? "commit" : "commits"} ${one}`;
   const arrows = [
