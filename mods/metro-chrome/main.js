@@ -1,5 +1,5 @@
 // The brand bar above the sidebar: room for the macOS window buttons, a place to drag the window, then Back and
-// Forward, then Projects (the overview) and Pull requests (with a dot while a review request is new) at its right edge.
+// Forward, then Projects (the overview), Pull requests (with a dot while a review request is new) and Issues at its right edge.
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { theme, run, layout, shared, setShared, exec, focused, spaces, notify } from "herdr";
@@ -168,7 +168,10 @@ export default class Brand extends View {
       .on_click(action)
       .child(svg(icon).size(17));
     const overviewShown = find(layout(), "view")?.active === "overview";
-    const prsLabel = prsShown ? "Show tabs" : fresh || news ? `Pull requests, ${[fresh && "new review requests", news && "news on yours"].filter(Boolean).join(" and ")}` : "Pull requests and issues";
+    // The view's two tabs each have a button; the one for the tab on screen leads back.
+    const mode = shared("metro-prs.mode") === "issues" ? "issues" : "prs";
+    const on = (m) => prsShown && mode === m;
+    const prsLabel = on("prs") ? "Show tabs" : fresh || news ? `Pull requests, ${[fresh && "new review requests", news && "news on yours"].filter(Boolean).join(" and ")}` : "Pull requests";
     // Dimmed, and doing nothing, with nowhere to go that way.
     const step = (id, label, icon, by) => {
       const can = this.next(by) >= 0;
@@ -185,9 +188,10 @@ export default class Brand extends View {
       .child(button("overview", overviewShown ? "Show tabs" : "Projects", "mods/metro-chrome/icons/layout-grid.svg",
         () => run("layout.select", { stack: "view", child: overviewShown ? "main" : "overview" }))
         .when(overviewShown, el => el.bg(t.background).text_color(t.foreground)))
-      .child(button("prs", prsLabel, "mods/metro-chrome/icons/git-pull-request.svg",
-        () => run("layout.select", { stack: "view", child: prsShown ? "main" : "prs" }))
-        .when(prsShown, el => el.bg(t.background).text_color(t.foreground))
-        .when(fresh + news > 0, el => el.child(div().absolute().top(4).right(4).size(7).rounded_full().bg(t.accent))));
+      .child(button("prs", prsLabel, "mods/metro-chrome/icons/git-pull-request.svg", () => run("metro-tabs.prs"))
+        .when(on("prs"), el => el.bg(t.background).text_color(t.foreground))
+        .when(fresh + news > 0, el => el.child(div().absolute().top(4).right(4).size(7).rounded_full().bg(t.accent))))
+      .child(button("issues", on("issues") ? "Show tabs" : "Issues", "mods/metro-chrome/icons/circle-dot.svg", () => run("metro-tabs.issues"))
+        .when(on("issues"), el => el.bg(t.background).text_color(t.foreground)));
   }
 }

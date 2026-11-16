@@ -282,11 +282,12 @@ export default class Tabs extends View {
       .when(["working", "blocked", "done"].includes(st) && news, el => el.child(mark(t, st)));
   }
 
-  // In the pull requests view the bar names it; the brand bar's button and the one here lead back.
+  // In the pull requests view the bar names the tab on screen; the brand bar's button and the one here lead back.
   prsBar(t) {
+    const issues = shared("metro-prs.mode") === "issues";
     return h_flex().id("prs-bar").flex_1().min_w(0).h(28).px(8).gap(8).items_center().text_size(13).text_color(t.foreground)
-      .child(svg("mods/metro-chrome/icons/git-pull-request.svg").size(14).flex_none().text_color(t.muted))
-      .child(div().truncate().child("Pull requests and issues"));
+      .child(svg(`mods/metro-chrome/icons/${issues ? "circle-dot" : "git-pull-request"}.svg`).size(14).flex_none().text_color(t.muted))
+      .child(div().truncate().child(issues ? "Issues" : "Pull requests"));
   }
 
   // In the overview the bar names it; the sidebar's button and the one here lead back.
