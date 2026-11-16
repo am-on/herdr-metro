@@ -68,7 +68,9 @@ function withReview({ author, reviewDecision, latestReviews = [], comments = [],
 }
 
 // Draft grey, open green, merged purple, closed red, as GitHub colors them.
-export const prColor = (pr, t) => pr.isDraft && pr.state === "OPEN" ? t.dim : pr.state === "MERGED" ? t.ansi5 : pr.state === "CLOSED" ? t.blocked : t.ansi2;
+// A pull request's icon follows its state, as GitHub's do.
+export const prIcon = (pr) => `mods/metro-chrome/icons/${pr.isDraft && pr.state === "OPEN" ? "git-pull-request-draft" : pr.state === "MERGED" ? "git-merge" : pr.state === "CLOSED" ? "git-pull-request-closed" : "git-pull-request"}.svg`;
+export const prColor =(pr, t) => pr.isDraft && pr.state === "OPEN" ? t.dim : pr.state === "MERGED" ? t.ansi5 : pr.state === "CLOSED" ? t.blocked : t.ansi2;
 
 // Open green, completed purple, not planned grey.
 export const issueColor = (issue, t) => issue.state === "OPEN" ? t.ansi2 : issue.stateReason === "NOT_PLANNED" ? t.dim : t.ansi5;

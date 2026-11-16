@@ -17,7 +17,7 @@ function closePane(pane) {
   if (s?.tabs.length === 1 && ps.filter((x) => x.tab === p.tab).length === 1) dialog("metro-dialog", { ask: "close", spaces: [s.id] });
   else run("pane.close", { pane });
 }
-import { lookup, staleness, prColor, issueColor, open, openDraft } from "./github.js";
+import { lookup, staleness, prColor, prIcon, issueColor, open, openDraft } from "./github.js";
 
 // The Claude Code agent of a space to hand work to: one that isn't working first, then the latest active.
 const claudeIn = (space) => agents().filter((a) => a.space === space && /claude/i.test(a.app ?? ""))
@@ -225,7 +225,7 @@ export default class Tabs extends View {
         .child("Rebase"),
       pr && link("gh-pr", pr.url, `Pull request #${pr.number}: ${pr.title}${review ? `. ${pr.review.who}` : ""}`)
         .tooltip(review ? `#${pr.number} ${pr.title}\n${pr.review.who}` : `#${pr.number} ${pr.title}`)
-        .child(svg("mods/metro-chrome/icons/github.svg").size(14).flex_none().text_color(prColor(pr, t)))
+        .child(svg(prIcon(pr)).size(14).flex_none().text_color(prColor(pr, t)))
         .child(div().text_color(t.muted).child(`#${pr.number}`))
         .when(Boolean(review), el => el.child(svg(review.icon).size(12).flex_none().text_color(review.color))),
       // A branch without a pull request, other than the default one, can open a draft.
