@@ -4,6 +4,7 @@ import { v_flex, h_flex, TextareaState, Textarea, InputState, Input, Scrollbar, 
 import { namer } from "./name.js";
 import { spaces, panes, agents, focused, props, shared, setShared, nextCommand, knownAgents, run, exec, hc, readTextFile, watchFolder, theme, settings, notify, openOverlay, closeOverlay } from "herdr";
 import { untrackedLines } from "./untracked.js";
+import { SYNTAX, highlight } from "./syntax.js";
 
 // Reads write nothing under .git, so the folder watch doesn't wake on its own refresh.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -456,7 +457,7 @@ export default class Review extends View {
     }
     if (this.open !== path) return;
     this.truncated = lines.length > MAX_LINES;
-    this.rows = diffRows(cut(lines));
+    this.rows = highlight(diffRows(cut(lines)), path);
   }
 
   pick(path, cx) {
@@ -554,6 +555,7 @@ export default class Review extends View {
       const hits = new Map();
       rows.forEach((row, i) => { const n = row.side ? findIn(row.text, needle).length : 0; if (n) hits.set(i, n); });
       if (!hits.size) continue;
+      highlight(rows, f.path);
       items.push({ type: "space", key: `s\u0000${f.path}`, path: f.path });
       items.push({ type: "file", key: `f\u0000${f.path}`, path: f.path, count: [...hits.values()].reduce((a, b) => a + b, 0) });
       let last = -1;
@@ -835,21 +837,34 @@ export default class Review extends View {
       .child(this.code(row, c?.[2]));
   }
 
-  // The code, with the changed middle of a paired line and the search's matches highlighted; split at spaces so it still wraps.
+  // The code in its syntax colors, with the changed middle of a paired line and the search's matches highlighted.
+  // Each word is one box, its colored pieces inside, so a line wraps only at spaces.
   code(row, mark, line = false, current = -1) {
     const text = row.text, base = div().flex_1().min_w(0).pr(12).line_height(`${ROW}px`);
-    const changed = row.mark && mark ? row.mark : null, hits = findIn(text, this.needle());
-    if (!changed && !hits.length) return line ? base.truncate().child(text) : base.child(text);
-    const cuts = [...new Set([0, text.length, ...(changed ?? []), ...hits.flat()])].sort((a, b) => a - b);
-    const pieces = [], look = settings().dark ? "dark" : "light";
+    const changed = row.mark && mark ? row.mark : null, hits = findIn(text, this.needle()), tokens = row.tokens ?? [];
+    if (!changed && !hits.length && !tokens.length) return line ? base.truncate().child(text) : base.child(text);
+    const look = settings().dark ? "dark" : "light", colors = SYNTAX[look];
+    const cuts = [...new Set([0, text.length, ...(changed ?? []), ...hits.flat(), ...tokens.flatMap(([a, b]) => [a, b])])].sort((a, b) => a - b);
+    const words = [];
+    let word = null;
     for (let k = 0; k + 1 < cuts.length; k++) {
       const a = cuts[k], b = cuts[k + 1], hit = hits.findIndex(([x, y]) => a >= x && b <= y);
       const bg = hit >= 0 ? (hit === current ? CURRENT : FOUND)[look] : changed && a >= changed[0] && b <= changed[1] ? mark : null;
-      for (const word of text.slice(a, b).split(/(\s+)/).filter(Boolean)) pieces.push([word, bg]);
+      const color = colors[tokens.find(([x, y]) => a >= x && b <= y)?.[2]] ?? null;
+      for (const part of text.slice(a, b).split(/(\s+)/).filter(Boolean)) {
+        const space = /^\s/.test(part), end = word?.at(-1);
+        // A space ends the word before it, so a wrapped line starts with a word; indentation is a box of its own.
+        if (space && end && !word.space && end.bg === bg) { end.text += part; word = null; continue; }
+        if (space || !word || word.space) words.push(word = Object.assign([], { space }));
+        const last = word.at(-1);
+        if (last && last.bg === bg && last.color === color) last.text += part;
+        else word.push({ text: part, bg, color });
+      }
     }
+    const piece = (p) => div().flex_none().when(Boolean(p.bg), (e) => e.bg(p.bg)).when(Boolean(p.color), (e) => e.text_color(p.color)).child(p.text);
     // One line: a result row is 20px high and cut at the right.
     return (line ? base.flex().overflow_hidden() : base.flex().flex_wrap())
-      .children(pieces.map(([word, bg]) => div().flex_none().when(Boolean(bg), (e) => e.bg(bg)).child(word)));
+      .children(words.map((w) => (w.length === 1 ? piece(w[0]) : h_flex().flex_none().children(w.map(piece)))));
   }
 
   // A row of the results: a file's name and match count, a gap where lines are skipped, or a diff line on one line.
