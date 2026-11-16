@@ -40,6 +40,13 @@ Herdr picks the files up while it runs, and `ctrl-shift-l` switches back to your
 "layout:metro": { "cmd-shift-a": "metro-tabs.view" }
 ```
 
+For closing and renaming from the keyboard to ask in metro's own dialogs too, add these to the same section:
+
+```json
+"cmd-w": "metro-tabs.close-tab", "cmd-shift-w": "metro-tabs.close-pane",
+"f2": "metro-tabs.rename-tab", "shift-f2": "metro-tabs.rename-space"
+```
+
 It expects [`gh`](https://cli.github.com), signed in, for pull requests, issues and the worktree picker.
 
 ### Usage

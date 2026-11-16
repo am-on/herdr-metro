@@ -5,6 +5,9 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { spaces, panes, agents, terminals, run, openOverlay, pickFolder, theme, shared, setShared, layout, settings, exec, home, appHome, readTextFile, knownAgents } from "herdr";
+
+// Metro's dialogs open frameless at one size and draw their own card, as in metro-menu and metro-tabs.
+const dialog = (mod, p) => openOverlay({ mod, kind: "dialog", frame: "none", width: 640, height: 0.9, props: p });
 import { namer } from "./name.js";
 
 // Headings are bold in the system font, which has weights (the UI font, Geist, has one).
@@ -275,12 +278,16 @@ export default class Overview extends View {
       .child(this.logo(program, kind, t, shown || lit ? t.background : t.chrome))
       .child(div().flex_1().min_w(0).truncate().child(name))
       .when(c.panes > 1, (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(`${c.panes} panes`)))
-      // × closes the tab without showing it; Herdr asks first when it's its space's last. Its place is kept while hidden.
+      // × closes the tab without showing it; metro-dialog asks first when it's its space's last. Its place is kept while hidden.
       .child(div().id(`${id}-close`).size(20).flex_none().flex().items_center().justify_center().rounded(4)
         .when(lit, (el) => el.text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
           .role("button").accessibility_label(`Close ${name}`).tooltip("Close tab")
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); })
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            const s = spaces().find((x) => (x.tabs ?? []).some((k) => k.id === c.id));
+            if (s?.tabs.length === 1) dialog("metro-dialog", { ask: "close", spaces: [s.id] }); else run("tab.close", { id: c.id });
+          })
           .child(svg("mods/metro-chrome/icons/close.svg").size(12))));
   }
 
@@ -302,10 +309,8 @@ export default class Overview extends View {
         .child(svg(icon).size(13)));
     const folder = project.scratch ? null : space ? (row.linked ? row.top : null) : (row.main ? null : row.path);
     const controls = h_flex().flex_none().gap(1)
-      .child(button("close", "mods/metro-chrome/icons/close.svg", "Close (keeps the worktree)", space && (() => run("space.close", { id: space.id }))))
-      .child(button("remove", "mods/metro-chrome/icons/trash.svg", "Remove worktree…", folder && (() => openOverlay({
-        mod: "metro-worktree", kind: "dialog", frame: "none", width: 520, height: 0.9,
-        props: { folder, ...on, ...(space ? { space: space.id } : {}), action: "remove" } }))));
+      .child(button("close", "mods/metro-chrome/icons/close.svg", "Close (keeps the worktree)", space && (() => dialog("metro-dialog", { ask: "close", spaces: [space.id] }))))
+      .child(button("remove", "mods/metro-chrome/icons/trash.svg", "Remove worktree…", folder && (() => dialog("metro-worktree", { folder, ...on, ...(space ? { space: space.id } : {}), action: "remove" }))));
     // A worktree whose pull request merged says so, and offers to remove it.
     const done = folder && row.name !== "Main" && row.branch && this.merged[project.path]?.[row.branch];
     const mergedPill = done && h_flex().id(`${id}-merged`).h(20).px(7).gap(4).flex_none().items_center().rounded_full().text_size(11.5)
@@ -314,7 +319,7 @@ export default class Overview extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        openOverlay({ mod: "metro-worktree", kind: "dialog", frame: "none", width: 520, height: 0.9, props: { folder, ...on, ...(space ? { space: space.id } : {}), action: "remove" } });
+        dialog("metro-worktree", { folder, ...on, ...(space ? { space: space.id } : {}), action: "remove" });
       })
       .child(svg("mods/metro-chrome/icons/git-merge.svg").size(12)).child("Merged · Remove");
     if (!space) {
@@ -385,8 +390,7 @@ export default class Overview extends View {
     const label = p.scratch ? "New terminal" : p.folder ? "New space in this folder" : "New worktree";
     const create = () => p.scratch ? run("metro-tabs.scratch") : p.folder
       ? run("space.new", { folder: p.folder, ...on })
-      : openOverlay({ mod: "metro-worktree", kind: "dialog", width: 600, height: 520,
-        props: p.closed ? { folder: p.closed.path, ...on, action: "new" } : { space: p.space, action: "new" } });
+      : dialog("metro-worktree", p.closed ? { folder: p.closed.path, ...on, action: "new" } : { space: p.space, action: "new" });
     // The controls hold their place while hidden, so showing them moves nothing.
     const control = (key, icon, name, action) => div().id(`${id}-${key}`).size(26).flex_none().flex().items_center().justify_center().rounded(6)
       .when(lit, (el) => el.text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -447,11 +451,11 @@ export default class Overview extends View {
     run("space.new", { folder });
   }
 
-  // × forgets a project, as the sidebar's does: it's no longer kept, and an open one's spaces close, Herdr asking first.
+  // × forgets a project, as the sidebar's does: it's no longer kept, and an open one's spaces close once metro-dialog has asked.
   dismiss(p) {
-    setShared("projects.kept", (shared("projects.kept") ?? []).filter((k) => k.key !== p.key));
-    if (p.closed) return;
-    for (const r of p.rows) if (r.space && spaces().some((s) => s.id === r.space)) run("space.close", { id: r.space });
+    const ids = p.closed ? [] : p.rows.filter((r) => r.space && spaces().some((s) => s.id === r.space)).map((r) => r.space);
+    if (!ids.length) return setShared("projects.kept", (shared("projects.kept") ?? []).filter((k) => k.key !== p.key));
+    dialog("metro-dialog", { ask: "close", spaces: ids, title: `Close ${p.name}?`, forget: p.key });
   }
 
   // The last worktrees shown, newest first, each with its project's avatar and name; held still while the overview

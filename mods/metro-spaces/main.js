@@ -7,6 +7,9 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
+
+// Metro's dialogs open frameless at one size and draw their own card, as in metro-menu and metro-tabs.
+const dialog = (mod, p) => openOverlay({ mod, kind: "dialog", frame: "none", width: 640, height: 0.9, props: p });
 import { spaces, agents, terminals, machines, layout, run, openOverlay, hc, theme, shared, setShared, window } from "herdr";
 
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
@@ -131,7 +134,7 @@ export default class Spaces extends View {
 
   menu(w) {
     // A popup is as tall as its items; height is only the most.
-    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
+    openOverlay({ mod: "metro-menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
   }
 
   // A project's title: what the person named it, else its repo's name or its folder.
@@ -158,12 +161,13 @@ export default class Spaces extends View {
     cx.notify();
   }
 
-  // × forgets a project; an open one also closes its spaces, and Herdr asks before each.
+  // × forgets a project; an open one closes its spaces too, once metro-dialog has asked.
   dismiss({ g, closed }) {
-    if (g.scratch) { for (const id of shared("projects.scratch") ?? []) run("space.close", { id }); return; }
-    setShared("projects.kept", (shared("projects.kept") ?? []).filter((k) => k.key !== g.repo));
-    if (closed) return;
-    for (const [id, o] of Object.entries(shared("projects.of") ?? {})) if (o.key === g.repo) run("space.close", { id });
+    const live = new Set(spaces().map((s) => s.id));
+    const ids = g.scratch ? (shared("projects.scratch") ?? []).filter((id) => live.has(id))
+      : Object.entries(shared("projects.of") ?? {}).filter(([id, o]) => o.key === g.repo && live.has(id)).map(([id]) => id);
+    if (closed || !ids.length) { if (!g.scratch) setShared("projects.kept", (shared("projects.kept") ?? []).filter((k) => k.key !== g.repo)); return; }
+    dialog("metro-dialog", { ask: "close", spaces: ids, title: `Close ${this.title(g)}?`, ...(g.scratch ? {} : { forget: g.repo }) });
   }
 
   // A closed kept project opens as a new space in its folder (a repo's main checkout).
@@ -289,7 +293,7 @@ export default class Spaces extends View {
       .when(lit && !closed && !editing, el => el.child(control("new", "mods/metro-chrome/icons/plus.svg", g.folder ? "New space in this folder" : "New worktree (a new branch checkout)", () => {
         if (g.scratch) run("metro-tabs.scratch");
         else if (g.folder) run("space.new", { folder: g.folder, ...(w.machine ? { machine: w.machine } : {}) });
-        else openOverlay({ mod: "metro-worktree", kind: "dialog", width: 600, height: 520, props: { space: w.id, action: "new" } });
+        else dialog("metro-worktree", { space: w.id, action: "new" });
       })))
       .when(lit, el => el.child(control("dismiss", "mods/metro-chrome/icons/close.svg", closed ? "Remove from the sidebar" : "Close this project's spaces (asks first)", () => this.dismiss(r)))));
   }
@@ -326,7 +330,7 @@ export default class Spaces extends View {
 
   // The dialog that removes a worktree: it draws its own card, as tall as what it says, in this frameless area.
   askRemove({ folder, machine, space }) {
-    openOverlay({ mod: "metro-worktree", kind: "dialog", frame: "none", width: 520, height: 0.9, props: { folder, machine, space, action: "remove" } });
+    dialog("metro-worktree", { folder, machine, space, action: "remove" });
   }
 
   // The × in a hovered card's top-right corner; pressing it never starts a drag or selects the card.
@@ -369,10 +373,10 @@ export default class Spaces extends View {
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
-      // × removes a worktree, its space included, in one dialog; any other space closes, and Herdr asks first when it would end running agents.
+      // × removes a worktree, its space included, in one dialog; any other space closes once metro-dialog has asked.
       .when(this.hovered === `space-${w.id}`, el => el.child(g?.linked
         ? this.cornerClose(`space-${w.id}-remove`, "Remove worktree (asks first)", t, () => this.askRemove({ folder: g.top, machine: w.machine ?? null, space: w.id }))
-        : this.cornerClose(`space-${w.id}-close`, "Close space", t, () => run("space.close", { id: w.id }))));
+        : this.cornerClose(`space-${w.id}-close`, "Close space", t, () => dialog("metro-dialog", { ask: "close", spaces: [w.id] }))));
   }
 
   // Shows every project at once in the work area (metro-overview), or the tabs again; lit while it shows.

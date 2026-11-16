@@ -5,6 +5,7 @@
     "version": "0.1.10"
   },
   "type": "row",
+  "terminal_menu": "metro-menu",
   "preview": "layouts/metro.png",
   "background": "canvas",
   "terminal_opacity": 0,

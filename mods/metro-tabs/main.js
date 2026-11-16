@@ -2,6 +2,21 @@ import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { spaces, panes, agents, terminals, focused, run, hc, openOverlay, theme, window, layout, settings, nextCommand, shared, setShared, home, knownAgents, notify } from "herdr";
 import { namer } from "./name.js";
+
+// Metro's dialogs open frameless at one size and draw their own card, as in metro-menu, metro-spaces and metro-overview.
+const dialog = (mod, p) => openOverlay({ mod, kind: "dialog", frame: "none", width: 640, height: 0.9, props: p });
+// Closing a space's last tab, or its last tab's last pane, closes the space: that asks in metro-dialog; anything else closes at once.
+const spaceOfTab = (tab) => spaces().find((x) => (x.tabs ?? []).some((c) => c.id === tab));
+function closeTab(id) {
+  const s = spaceOfTab(id);
+  if (s?.tabs.length === 1) dialog("metro-dialog", { ask: "close", spaces: [s.id] });
+  else run("tab.close", { id });
+}
+function closePane(pane) {
+  const ps = panes(), p = ps.find((x) => x.pane === pane), s = p && spaceOfTab(p.tab);
+  if (s?.tabs.length === 1 && ps.filter((x) => x.tab === p.tab).length === 1) dialog("metro-dialog", { ask: "close", spaces: [s.id] });
+  else run("pane.close", { pane });
+}
 import { lookup, staleness, prColor, issueColor, open, openDraft } from "./github.js";
 
 // The Claude Code agent of a space to hand work to: one that isn't working first, then the latest active.
@@ -78,13 +93,19 @@ export default class Tabs extends View {
     // `metro-tabs.view` (cmd-shift-a in keys.json) switches between the tabs and the agent view; `metro-tabs.overview`
     // (cmd-p) opens and closes the overview of every project; `metro-tabs.scratch` (cmd-n) opens a one-off terminal;
     // `metro-tabs.prs` (cmd-r) and `metro-tabs.issues` (cmd-i) open the pull requests view on that tab of its list
-    // (shared `metro-prs.mode`), and close it when it already shows that tab.
+    // (shared `metro-prs.mode`), and close it when it already shows that tab. `close-tab` (cmd-w), `close-pane`
+    // (cmd-shift-w), `rename-tab` (f2) and `rename-space` (shift-f2) act on what's focused through metro's dialogs.
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
         if (c === "view" && find(layout(), "view")) switchView();
         if (c === "overview" && find(layout(), "view")) run("layout.select", { stack: "view", child: overviewView() ? "main" : "overview" });
         if (c === "scratch") this.scratch(cx);
+        const f = focused();
+        if (c === "close-tab" && f?.tab) closeTab(f.tab);
+        if (c === "close-pane" && f?.pane) closePane(f.pane);
+        if (c === "rename-tab" && f?.tab) dialog("metro-dialog", { ask: "rename", tab: f.tab });
+        if (c === "rename-space" && f?.space) dialog("metro-dialog", { ask: "rename", space: f.space });
         if ((c === "prs" || c === "issues") && find(layout(), "view")) {
           const mode = shared("metro-prs.mode") === "issues" ? "issues" : "prs";
           if (prsView() && mode === c) run("layout.select", { stack: "view", child: "main" });
@@ -343,18 +364,18 @@ export default class Tabs extends View {
           .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).role("button").accessibility_label("Check again later")
           .on_click(flag(true)).child(svg("mods/metro-chrome/icons/bookmark.svg").size(12)))))
         .when(c.active || lit, el => el.child(div().id(`close-${c.id}`).size(18).flex_none().flex().items_center().justify_center().rounded(4)
-          .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/metro-chrome/icons/close.svg").size(12))));
+          .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); closeTab(c.id); }).child(svg("mods/metro-chrome/icons/close.svg").size(12))));
       return v_flex().id(`tab-${c.id}`).w(180).h_full().flex_none().text_size(13)
         .border_r(1).border_color(t.border)
         .bg(c.active || lit ? t.background : t.chrome).text_color(c.active || lit ? t.foreground : t.muted)
         .on_hover((on, cx) => { if (on) this.hovered = c.id; else if (this.hovered === c.id) this.hovered = null; cx.notify(); })
-        .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
+        .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) dialog("metro-dialog", { ask: "rename", tab: c.id }); })
         .on_mouse_up("left", () => {
           const from = this.pressed; this.pressed = null;
           if (from !== null && from !== i) run("tab.move", { id: shown[from].id, index: space.tabs.findIndex(x => x.id === c.id) + 1 });
           else run("tab.select", { id: c.id });
         })
-        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
+        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "metro-menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
         .child(row)
         .child(div().h(2).flex_none().when(c.active, el => el.bg(t.foreground)).when(!c.active && lit, el => el.bg(t.border)));
     };

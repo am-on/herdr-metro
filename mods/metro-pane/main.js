@@ -7,7 +7,16 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, terminals, props, run, hc, theme, home, spaces, shared } from "herdr";
+import { panes, terminals, props, run, hc, theme, home, spaces, shared, openOverlay } from "herdr";
+
+// Closing a space's last tab's last pane closes the space: that asks in metro-dialog (frameless, as every metro dialog);
+// any other pane closes at once.
+function closePane(pane) {
+  const ps = panes(), p = ps.find((x) => x.pane === pane), s = p && spaces().find((x) => (x.tabs ?? []).some((c) => c.id === p.tab));
+  if (s?.tabs.length === 1 && ps.filter((x) => x.tab === p.tab).length === 1)
+    openOverlay({ mod: "metro-dialog", kind: "dialog", frame: "none", width: 640, height: 0.9, props: { ask: "close", spaces: [s.id] } });
+  else run("pane.close", { pane });
+}
 import { namer } from "./name.js";
 
 const thousands = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -173,6 +182,6 @@ export default class Pane extends View {
         .child(this.button(t, `ph-r-${pane}`, "mods/metro-pane/split-right.svg", "Split right", () => run("pane.split", { direction: "right", pane })))
         .child(this.button(t, `ph-d-${pane}`, "mods/metro-pane/split-down.svg", "Split down", () => run("pane.split", { direction: "down", pane })))
         .child(this.button(t, `ph-z-${pane}`, `mods/metro-pane/${p.zoomed ? "unzoom" : "zoom"}.svg`, p.zoomed ? "Unzoom pane" : "Zoom pane", () => run("pane.zoom", { pane })))
-        .child(this.button(t, `ph-x-${pane}`, "mods/metro-pane/close.svg", "Close pane", () => run("pane.close", { pane })))));
+        .child(this.button(t, `ph-x-${pane}`, "mods/metro-pane/close.svg", "Close pane", () => closePane(pane)))));
   }
 }

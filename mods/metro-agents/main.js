@@ -3,7 +3,16 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Button, Scrollbar } from "gpui-base";
-import { agents, terminals, panes, spaces, focused, run, hc, home, theme, shared, setShared, setAgentOrder, layout } from "herdr";
+import { agents, terminals, panes, spaces, focused, run, hc, home, theme, shared, setShared, setAgentOrder, layout, openOverlay } from "herdr";
+
+// Closing a space's last tab's last pane closes the space: that asks in metro-dialog (frameless, as every metro dialog);
+// any other pane closes at once.
+function closePane(pane) {
+  const ps = panes(), p = ps.find((x) => x.pane === pane), s = p && spaces().find((x) => (x.tabs ?? []).some((c) => c.id === p.tab));
+  if (s?.tabs.length === 1 && ps.filter((x) => x.tab === p.tab).length === 1)
+    openOverlay({ mod: "metro-dialog", kind: "dialog", frame: "none", width: 640, height: 0.9, props: { ask: "close", spaces: [s.id] } });
+  else run("pane.close", { pane });
+}
 import { namer } from "./name.js";
 
 function find(node, id) {
@@ -411,7 +420,7 @@ export default class Agents extends View {
           cx.stop_propagation();
           this.hovered = null;
           const pane = panes().find((p) => p.terminal === a.address);
-          if (pane) run("pane.close", { pane: pane.pane });
+          if (pane) closePane(pane.pane);
           else run("terminal.kill", { terminal: a.address });
           cx.notify();
         })
@@ -518,7 +527,7 @@ export default class Agents extends View {
         .rounded(4).text_color(t.dim)
         .accessibility_label(review ? "Close review" : "Close terminal").tooltip(review ? "Close review" : "Close terminal")
         .hover(s => s.bg(t.hover).text_color(t.foreground))
-        .on_click((_e, cx) => { cx.stop_propagation(); this.hovered = null; run("pane.close", { pane: p.pane }); cx.notify(); })
+        .on_click((_e, cx) => { cx.stop_propagation(); this.hovered = null; closePane(p.pane); cx.notify(); })
         .child(svg("mods/metro-chrome/icons/close.svg").size(13).flex_none());
       return v_flex()
         .id(`other-${x.address}`)

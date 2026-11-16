@@ -418,21 +418,12 @@ export default class Worktree extends View {
         .child(div().truncate().text_size(11.5).text_color(t.dim).child(tilde(c.path, this.userHome ?? "")));
     };
     const count = rows.length === all.length ? `${all.length} checkouts` : `${rows.length}/${all.length} checkouts`;
-    return v_flex()
-      .id("worktree")
-      .track_focus(this.handle)
-      .on_key_down((e, cx) => this.key(e, cx))
-      .size_full()
-      .p(16)
-      .gap(10)
-      .bg(t.popover)
-      .text_size(13)
-      .child(h_flex().child(div().flex_1().font_semibold().text_color(t.foreground).child(`Open worktree${r ? ` of ${r.name}` : ""}`)).child(div().text_size(11).text_color(t.dim).child(r ? count : "")))
+    return this.card(t, 600, 520, this.heading(t, "git-branch", `Open worktree${r ? ` of ${r.name}` : ""}`, r ? count : ""))
       .when(r === undefined || (r && this.list === undefined), (el) => el.child(div().text_color(t.muted).child("\u2026")))
       .when(r === null, (el) => el.child(div().text_color(t.muted).child(`${this.folder ? tilde(this.folder, this.userHome ?? "") : "This folder"} is not in a git repository.`)))
       .when(Boolean(r && this.list), (el) =>
         el
-          .child(Input.new(this.input).h(32).px(10).items_center().rounded(6).border(1).border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_color(t.foreground))
+          .child(this.field(t))
           .child(
             div()
               .relative()
@@ -449,8 +440,8 @@ export default class Worktree extends View {
               .child(Scrollbar.vertical("wt-list").absolute().inset_0()),
           ),
       )
-      .child(h_flex().gap(12).items_center()
-        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).child("↑↓ choose"))
+      .child(h_flex().mt(6).gap(12).items_center()
+        .child(div().flex_1().min_w(0).text_size(12).text_color(t.dim).child("↑↓ choose"))
         .child(this.buttons(t, r === null, "Open worktree", Boolean(rows[this.at]), () => this.open(rows[this.at]))));
   }
 
@@ -518,21 +509,12 @@ export default class Worktree extends View {
     const count = r && this.branches ? `${this.prs === undefined ? "" : `${prs} pull request${prs === 1 ? "" : "s"} · `}${items.filter((i) => i.kind === "branch").length} branches` : "";
     const status = this.fetching ? "fetching origin…" : this.fetchError ? "couldn't fetch origin: its branches are as of the last fetch" : "↑↓ choose";
     const chosen = items[this.at];
-    return v_flex()
-      .id("worktree")
-      .track_focus(this.handle)
-      .on_key_down((e, cx) => this.key(e, cx))
-      .size_full()
-      .p(16)
-      .gap(10)
-      .bg(t.popover)
-      .text_size(13)
-      .child(h_flex().child(div().flex_1().font_semibold().text_color(t.foreground).child(`New worktree${r ? ` of ${r.name}` : ""}`)).child(div().text_size(11).text_color(t.dim).child(count)))
+    return this.card(t, 600, 520, this.heading(t, "git-branch", `New worktree${r ? ` of ${r.name}` : ""}`, count))
       .when(r === undefined, (el) => el.child(div().text_color(t.muted).child("…")))
       .when(r === null, (el) => el.child(div().text_color(t.muted).child(`${this.folder ? tilde(this.folder, this.userHome ?? "") : "This folder"} is not in a git repository.`)))
       .when(Boolean(r), (el) =>
         el
-          .child(Input.new(this.input).h(32).px(10).items_center().rounded(6).border(1).border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_color(t.foreground))
+          .child(this.field(t))
           .child(
             div()
               .id("pick-list")
@@ -550,17 +532,46 @@ export default class Worktree extends View {
           ),
       )
       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
-      .child(h_flex().gap(12).items_center()
-        .child(div().flex_1().min_w(0).text_size(11).text_color(this.fetchError ? t.working : t.dim).child(status))
+      .child(h_flex().mt(6).gap(12).items_center()
+        .child(div().flex_1().min_w(0).text_size(12).text_color(this.fetchError ? t.working : t.dim).child(status))
         .child(this.buttons(t, r === null, this.busy ? "Creating…" : chosen && open(chosen.branch) ? "Open worktree" : "Create worktree",
           Boolean(r && chosen && !this.busy), (cx) => this.choose(chosen, cx))));
   }
 
   render(cx) {
     const t = theme();
-    if (this.opening) return this.renderOpen(t);
-    if (this.picking) return this.renderPick(t);
-    if (props()?.action === "remove") return this.renderRemove(t);
+    // A dialog keeps the size it opened at, so each opens frameless and tall and draws its own card in the middle.
+    return h_flex().id("worktree").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+      .size_full().items_center().justify_center()
+      .on_mouse_down("left", () => this.close())
+      .child(this.opening ? this.renderOpen(t) : this.picking ? this.renderPick(t) : props()?.action === "remove" ? this.renderRemove(t) : this.renderNew(t));
+  }
+
+  // The card every metro dialog is (metro-dialog's too): 14px type, as tall as what it says, or `h` when it holds a
+  // list; a press on it stays on it.
+  card(t, w, h, heading) {
+    return v_flex().id("worktree-card").w(w).when(Boolean(h), (el) => el.h(h)).px(24).pt(22).pb(20).gap(14).rounded(10)
+      .bg(t.popover).border(1).border_color(t.border).shadow_lg().text_size(14)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(heading);
+  }
+
+  // Its heading: an icon in a tinted circle and the 17px title, with a count at the right when it lists something.
+  heading(t, icon, title, note = "", tint = t.foreground) {
+    return h_flex().flex_none().gap(12).items_center()
+      .child(div().size(34).flex_none().rounded_full().bg(tint + "1f").flex().items_center().justify_center()
+        .child(svg(`mods/metro-chrome/icons/${icon}.svg`).size(17).text_color(tint)))
+      .child(div().flex_1().min_w(0).truncate().text_size(17).text_color(t.foreground).child(title))
+      .when(Boolean(note), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(note)));
+  }
+
+  // The text field, as tall as the buttons' row is apart.
+  field(t) {
+    return Input.new(this.input).h(36).px(10).items_center().rounded(7).border(1).border_color(this.inputFocused ? t.accent : t.input)
+      .bg(t.background).text_color(t.foreground).flex_none();
+  }
+
+  renderNew(t) {
     const s = this.space();
     const r = this.repo;
     const title = `New worktree${r ? ` of ${r.name}` : ""}`;
@@ -571,33 +582,11 @@ export default class Worktree extends View {
           ? `${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is not in a git repository.`
           : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists here or on origin is checked out; a new one starts from here.`;
     const blocked = !r;
-    return v_flex()
-      .id("worktree")
-      .track_focus(this.handle)
-      .on_key_down((e, cx) => this.key(e, cx))
-      .size_full()
-      .p(16)
-      .gap(10)
-      .bg(t.popover)
-      .text_size(13)
-      .child(div().font_semibold().text_color(t.foreground).child(title))
+    return this.card(t, 480, null, this.heading(t, "git-branch", title))
       .child(div().text_color(t.muted).child(detail))
-      .when(!blocked, (el) =>
-        el.child(
-          Input.new(this.input)
-            .h(32)
-            .px(10)
-            .items_center()
-            .rounded(6)
-            .border(1)
-            .border_color(this.inputFocused ? t.accent : t.input)
-            .bg(t.background)
-            .text_color(t.foreground),
-        ),
-      )
+      .when(!blocked, (el) => el.child(this.field(t)))
       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
-      .child(div().flex_1())
-      .child(this.buttons(t, r === null, this.busy ? "Creating…" : "Create worktree", !blocked && !this.busy, (cx) => this.go(cx)));
+      .child(div().mt(6).child(this.buttons(t, r === null, this.busy ? "Creating…" : "Create worktree", !blocked && !this.busy, (cx) => this.go(cx))));
   }
 
   // Removing a worktree: a trash icon on red and "Remove <name>?" as the heading, what goes and what stays, each risk
@@ -632,20 +621,10 @@ export default class Worktree extends View {
         ...(open ? [risk("risk-agents", open === 1 ? "It has an open agent: it will be closed." : `It has ${open} open agents: they will be closed.`)] : []),
         ...(this.unpushed.length ? [risk("risk-submodules", `Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)] : []),
       ];
-    // A dialog keeps the size it opened at, so this one opens frameless and tall and draws its own card, as tall as what it says.
-    return h_flex().id("worktree").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
-      .size_full().items_center().justify_center()
-      .on_mouse_down("left", () => this.close())
-      .child(v_flex().id("worktree-card").w(480).px(24).pt(22).pb(20).gap(14).rounded(10)
-        .bg(t.popover).border(1).border_color(t.border).shadow_lg().text_size(14)
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .child(h_flex().flex_none().gap(12).items_center()
-          .child(div().size(34).flex_none().rounded_full().bg(t.blocked + "1f").flex().items_center().justify_center()
-            .child(svg("mods/metro-chrome/icons/trash.svg").size(17).text_color(t.blocked)))
-          .child(div().flex_1().min_w(0).truncate().text_size(17).text_color(t.foreground).child(`Remove ${name}?`)))
-        .children(body)
-        .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
-        .child(div().mt(6).child(this.buttons(t, blocked, this.busy ? "Removing…" : "Remove worktree", Boolean(!blocked && r && !this.busy), (cx) => this.go(cx), t.blocked, "#ffffff"))));
+    return this.card(t, 480, null, this.heading(t, "trash", `Remove ${name}?`, "", t.blocked))
+      .children(body)
+      .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
+      .child(div().mt(6).child(this.buttons(t, blocked, this.busy ? "Removing…" : "Remove worktree", Boolean(!blocked && r && !this.busy), (cx) => this.go(cx), t.blocked, "#ffffff")));
   }
 
   // Every dialog asks with buttons as well as keys: Cancel (Esc), and its action (Enter), dimmed until it can act.
