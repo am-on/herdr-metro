@@ -10,7 +10,7 @@ A layout for the [Herdr app](https://herdr.dev) for running many coding agents a
 
 **Projects as lines.** Below, each repo is a line in its own color. Its stops are the main checkout and every worktree, with the branch under each. Worktrees with nothing open stay listed, below the open ones, so you can open them again. Pin a project to keep it when everything in it is closed, drag projects to reorder them, double-click to rename. **+** starts a worktree from a picker of the repo's open pull requests and branches, forks' PRs included.
 
-**A tab bar that knows the branch.** Next to the tabs: how far the branch is behind `origin`'s default branch, its pull request colored by state with approvals and requested changes, and the issue the branch is named after (`fix/312-…`). One click opens each on GitHub. **+** opens a terminal, a new Claude Code or Codex, or the review, in the project you're in.
+**A tab bar that knows the branch.** Next to the tabs: how far the branch is behind `origin`'s default branch, new commits pushed to its pull request on GitHub with a Pull button, its pull request colored by state with approvals and requested changes, and the issue the branch is named after (`fix/312-…`). One click opens each on GitHub. **+** opens a terminal, a new Claude Code or Codex, or the review, in the project you're in.
 
 ![The + menu under the tab bar: Terminal, Claude Code, Codex and Review changes](docs/new-tab.png)
 

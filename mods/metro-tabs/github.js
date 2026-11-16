@@ -16,7 +16,7 @@ export async function lookup(cwd, machine, branch) {
   const remote = await exec("git", ["remote", "get-url", "origin"], { cwd, on: machine });
   const repo = remote.code === 0 ? repoOf(remote.stdout) : null;
   if (!repo) return { repo: null, pr: null, issue: null };
-  const view = await exec("gh", ["pr", "view", "--json", "number,url,state,isDraft,title,author,reviewDecision,latestReviews,comments"], { cwd, on: machine });
+  const view = await exec("gh", ["pr", "view", "--json", "number,url,state,isDraft,title,author,reviewDecision,latestReviews,comments,headRefOid,headRefName,isCrossRepository"], { cwd, on: machine });
   let pr = null;
   try { if (view.code === 0) pr = withReview(JSON.parse(view.stdout)); } catch {}
   const n = issueNumberOf(branch);
@@ -51,6 +51,60 @@ export async function staleness(cwd, machine, branch) {
   if ((await git(["fetch", "--quiet", "--no-tags", "origin", base])).code !== 0) return { base, failed: true };
   const count = await git(["rev-list", "--count", `HEAD..${ref}`]);
   return count.code === 0 ? { base, behind: Number(count.stdout.trim()) } : null;
+}
+
+// Git at cwd over HTTPS, never prompting: { ok, out, err }.
+const quiet = (cwd, machine) => async (args) => {
+  const r = await exec("env", ["GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5", "git", ...overHttps(machine), ...args], { cwd, on: machine });
+  return { ok: r.code === 0, code: r.code, out: r.stdout.trim(), err: (r.stderr || r.stdout || "").trim().split("\n").filter(Boolean).pop()?.replace(/^(error|fatal): /, "") ?? "" };
+};
+
+// Fetches an open pull request's head from origin: a fork's as GitHub's pull/<n>/head, else into origin/<branch>.
+const fetchHead = (git, pr) => git(["fetch", "--quiet", "--no-tags", "origin", pr.isCrossRepository
+  ? `refs/pull/${pr.number}/head` : `+refs/heads/${pr.headRefName}:refs/remotes/origin/${pr.headRefName}`]);
+
+// Commits pushed to an open pull request on GitHub that the checkout at cwd doesn't have: { tip, count } (count null
+// when they couldn't be fetched to count), or null. A tip the branch once had and moved on from (amended, rebased)
+// isn't news. Fetches only when GitHub's tip isn't here yet.
+export async function incoming(cwd, machine, branch, pr) {
+  if (pr?.state !== "OPEN" || !pr.headRefOid) return null;
+  const git = quiet(cwd, machine), tip = pr.headRefOid;
+  const has = await git(["merge-base", "--is-ancestor", tip, "HEAD"]);
+  if (has.ok) return null;
+  if (has.code === 1) {
+    const behind = await git(["merge-base", "--is-ancestor", "HEAD", tip]);
+    const once = behind.ok ? null : await git(["reflog", "show", "--format=%H", `refs/heads/${branch}`]);
+    if (once?.out.split("\n").includes(tip)) return null;
+  } else if (!(await fetchHead(git, pr)).ok) return { tip, count: null };
+  const count = await git(["rev-list", "--count", `HEAD..${tip}`]);
+  return { tip, count: count.ok ? Number(count.out) : null };
+}
+
+// Brings the checkout at cwd to the pull request's tip: a fast-forward, or GitHub's force-push when every commit here
+// is on origin. Resolves with how many commits came in; throws why it left the branch alone (its title) and what to do.
+export async function pull(cwd, machine, branch, pr, tip) {
+  const git = quiet(cwd, machine);
+  const refuse = (title, body) => Object.assign(new Error(body), { title });
+  if (!(await git(["cat-file", "-e", `${tip}^{commit}`])).ok) {
+    const f = await fetchHead(git, pr);
+    if (!f.ok) throw refuse(`Couldn't fetch #${pr.number}`, "Check your connection, then pull again.");
+  }
+  const changes = await git(["status", "--porcelain", "--untracked-files=no"]);
+  if (!changes.ok || changes.out) throw refuse(`${branch} has uncommitted changes`, "Commit or stash them, then pull again.");
+  const count = Number((await git(["rev-list", "--count", `HEAD..${tip}`])).out) || 0;
+  if ((await git(["merge-base", "--is-ancestor", "HEAD", tip])).ok) {
+    const ff = await git(["merge", "--ff-only", "--quiet", tip]);
+    if (!ff.ok) throw refuse("Couldn't pull", `${ff.err}.`);
+    return count;
+  }
+  // Commits here on no remote, the ones origin/<branch> once pointed at included: a force-push leaves those on none.
+  const tracked = pr.isCrossRepository ? null : `refs/remotes/origin/${pr.headRefName}`;
+  const seen = tracked ? (await git(["reflog", "show", "--format=%H", tracked])).out.split("\n").filter(Boolean) : [];
+  const mine = await git(["rev-list", "--count", "HEAD", "--not", "--remotes", ...seen]);
+  if (!mine.ok || Number(mine.out) > 0) throw refuse(`${branch} has commits not on GitHub`, `Rebase them onto #${pr.number}, then push.`);
+  const move = await git(["reset", "--keep", "--quiet", tip]);
+  if (!move.ok) throw refuse("Couldn't pull", `${move.err}.`);
+  return count;
 }
 
 // What reviewers said on a pull request, its author's own reviews and comments left out: review.mark is the

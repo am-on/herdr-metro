@@ -17,7 +17,7 @@ function closePane(pane) {
   if (s?.tabs.length === 1 && ps.filter((x) => x.tab === p.tab).length === 1) dialog("metro-dialog", { ask: "close", spaces: [s.id] });
   else run("pane.close", { pane });
 }
-import { lookup, staleness, prColor, prIcon, issueColor, open, openDraft } from "./github.js";
+import { lookup, staleness, incoming, pull, prColor, prIcon, issueColor, open, openDraft } from "./github.js";
 
 // The Claude Code agent of a space to hand work to: one that isn't working first, then the latest active.
 const claudeIn = (space) => agents().filter((a) => a.space === space && /claude/i.test(a.app ?? ""))
@@ -85,7 +85,7 @@ export default class Tabs extends View {
     // GitHub facts per checkout and branch; the shown one is looked up again every three minutes, for a PR opened
     // since and for new commits on origin's default branch.
     this.gh = new Map();
-    this.ghBusy = null; // "draft" while a draft pull request opens
+    this.ghBusy = null; // "draft" while a draft pull request opens, "pull" while new commits come in
     // How Claude Code starts here: programs.json's, else plain `claude`.
     this.claudeRun = ["claude"];
     cx.spawn(async () => { try { this.claudeRun = (await knownAgents()).find((a) => a.key === "claude")?.run ?? this.claudeRun; } catch {} });
@@ -155,7 +155,8 @@ export default class Tabs extends View {
         lookup(at.cwd, at.machine, at.branch).catch(() => ({ repo: null, pr: null, issue: null })),
         staleness(at.cwd, at.machine, at.branch).catch(() => null),
       ]);
-      this.gh.set(at.key, { ...found, stale });
+      const news = await incoming(at.cwd, at.machine, at.branch, found.pr).catch(() => null);
+      this.gh.set(at.key, { ...found, stale, news });
       cx.notify();
     });
   }
@@ -191,6 +192,24 @@ export default class Tabs extends View {
     });
   }
 
+  // Brings in the commits pushed to the shown branch's pull request on GitHub, then looks again.
+  pullNews(at, pr, news, cx) {
+    if (this.ghBusy) return;
+    this.ghBusy = "pull";
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const n = await pull(at.cwd, at.machine, at.branch, pr, news.tip);
+        notify({ title: `Pulled ${n} commit${n === 1 ? "" : "s"}`, body: `${at.branch} matches #${pr.number} on GitHub.`, level: "success" });
+      } catch (e) {
+        notify({ title: e.title ?? "Couldn't pull", body: `${e.message ?? e}`, level: "warning" });
+      }
+      this.ghBusy = null;
+      this.fetchGh(at, cx);
+      cx.notify();
+    });
+  }
+
   // How far the branch is behind origin's default branch, the branch's pull request (with its review) and the issue
   // it's named after, each numbered and colored by its state; the repo's issues when the branch names none; then Refresh, which spins
   // while it looks and turns red when origin couldn't be fetched.
@@ -198,7 +217,7 @@ export default class Tabs extends View {
     const at = this.at = this.checkout();
     if (!at) return [];
     if (!this.gh.has(at.key)) this.fetchGh(at, cx);
-    const { repo, pr, issue, stale, loading } = this.gh.get(at.key) ?? {};
+    const { repo, pr, issue, stale, news, loading } = this.gh.get(at.key) ?? {};
     const link = (id, url, label) => h_flex().id(id).h(26).px(6).gap(6).flex_none().items_center().rounded(6).text_size(12)
       .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
       .role("link").accessibility_label(label).on_mouse_down("left", stop).on_click(() => url && open(url));
@@ -223,6 +242,17 @@ export default class Tabs extends View {
         .role("button").accessibility_label(`Ask Claude to rebase onto origin/${behind.base}`).tooltip(`Ask Claude Code here to rebase onto origin/${behind.base} (/re-main)`)
         .on_mouse_down("left", stop).on_click(() => this.rebase(at))
         .child("Rebase"),
+      // Commits pushed to the pull request on GitHub that this checkout doesn't have yet.
+      news && pr && link("gh-news", `${pr.url}/commits`, news.count ? `${commits(news.count)} on #${pr.number} not pulled` : `New commits on #${pr.number}`)
+        .tooltip(news.count ? `#${pr.number} has ${commits(news.count)} on GitHub that ${at.branch} doesn't: pull them`
+          : `#${pr.number} has new commits on GitHub, but they couldn't be fetched. Check your connection, then refresh.`)
+        .child(svg("mods/metro-chrome/icons/arrow-down.svg").size(14).flex_none().text_color(t.working))
+        .child(div().text_color(t.muted).child(news.count ? commits(news.count).replace(" ", " new ") : "New commits")),
+      news && pr && h_flex().id("gh-pull").h(26).px(8).min_w(68).flex_none().items_center().justify_center().rounded(6).text_size(12).cursor_pointer()
+        .text_color(t.muted).border(1).border_color(t.border).hover(s => s.bg(t.hover).text_color(t.foreground))
+        .role("button").accessibility_label(`Pull the new commits of #${pr.number}`).tooltip(`Pull #${pr.number}'s new commits into ${at.branch}`)
+        .on_mouse_down("left", stop).on_click((_e, cx) => this.pullNews(at, pr, news, cx))
+        .child(this.ghBusy === "pull" ? "Pulling…" : "Pull"),
       pr && link("gh-pr", pr.url, `Pull request #${pr.number}: ${pr.title}${review ? `. ${pr.review.who}` : ""}`)
         .tooltip(review ? `#${pr.number} ${pr.title}\n${pr.review.who}` : `#${pr.number} ${pr.title}`)
         .child(svg(prIcon(pr)).size(14).flex_none().text_color(prColor(pr, t)))
