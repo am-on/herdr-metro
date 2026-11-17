@@ -328,6 +328,16 @@ export default class Review extends View {
     if (json !== this.published) { this.published = json; setShared(`metro-review.${tab}`, summary); }
   }
 
+  // Sent on each render and after each refresh, as a review in a hidden tab doesn't render but the agents list still shows it.
+  share() {
+    const tab = this.tab ??= this.claimTab();
+    if (!tab) return null;
+    const add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
+    this.publish(tab, { mode: this.mode, base: this.baseName ?? null, last: this.lastCommit ?? null, listWidth: this.listWidth,
+      files: this.files.length, add, del, loading: Boolean(this.loading) });
+    return tab;
+  }
+
   // Uncommitted chosen by hand stays, even with nothing in it, until it has changes again.
   setMode(mode, cx, byHand = false) {
     if (byHand) this.keepUncommitted = mode === "uncommitted";
@@ -432,6 +442,7 @@ export default class Review extends View {
         this.loading = false;
         // Nothing uncommitted: the branch's changes are what there is to review.
         if (empty && !this.keepUncommitted && this.mode === "uncommitted") this.setMode("branch", cx);
+        this.share();
         cx.notify();
       }
     });
@@ -982,9 +993,7 @@ export default class Review extends View {
     // While a search finds nothing in the open file, no file is open.
     const searched = this.matchCounts();
     const openFile = this.files.find((f) => f.path === this.open && (!searched || searched.has(f.path)));
-    const tab = this.tab ??= this.claimTab();
-    if (tab) this.publish(tab, { mode: this.mode, base: this.baseName ?? null, last: this.lastCommit ?? null, listWidth: this.listWidth,
-      files: this.files.length, add, del, loading: Boolean(this.loading) });
+    const tab = this.share();
 
     // The switch sits in the pane header, over the file list; without a known tab the review draws it there itself.
     const modeSwitch = tab ? null : h_flex().h(40).flex_none().px(8).items_center().child(h_flex().w_full().h(26).p(2).gap(2).rounded(6)
