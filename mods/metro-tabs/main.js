@@ -5,11 +5,11 @@ import { namer } from "./name.js";
 
 // Metro's dialogs open frameless at one size and draw their own card, as in metro-menu, metro-spaces and metro-overview.
 const dialog = (mod, p) => openOverlay({ mod, kind: "dialog", frame: "none", width: 640, height: 0.9, props: p });
-// Closing a space's last tab, or its last tab's last pane, closes the space: that asks in metro-dialog; anything else closes at once.
+// Closing a space's last tab, or its last tab's last pane, closes the space: from a key that asks in metro-dialog, from a tab's × it closes at once, as the agents list's × does; anything else closes at once.
 const spaceOfTab = (tab) => spaces().find((x) => (x.tabs ?? []).some((c) => c.id === tab));
-function closeTab(id) {
+function closeTab(id, ask = true) {
   const s = spaceOfTab(id);
-  if (s?.tabs.length === 1) dialog("metro-dialog", { ask: "close", spaces: [s.id] });
+  if (s?.tabs.length === 1) ask ? dialog("metro-dialog", { ask: "close", spaces: [s.id] }) : run("space.close", { id: s.id, confirmed: true });
   else run("tab.close", { id });
 }
 function closePane(pane) {
@@ -426,7 +426,7 @@ export default class Tabs extends View {
           .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).role("button").accessibility_label("Check again later")
           .on_click(flag(true)).child(svg("mods/metro-chrome/icons/bookmark.svg").size(12)))))
         .when(c.active || lit, el => el.child(div().id(`close-${c.id}`).size(18).flex_none().flex().items_center().justify_center().rounded(4)
-          .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); closeTab(c.id); }).child(svg("mods/metro-chrome/icons/close.svg").size(12))));
+          .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); closeTab(c.id, false); }).child(svg("mods/metro-chrome/icons/close.svg").size(12))));
       return v_flex().id(`tab-${c.id}`).w(180).h_full().flex_none().text_size(13)
         .border_r(1).border_color(c.active || shown[i + 1]?.active ? t.input : t.border)
         .bg(c.active || lit ? t.background : t.chrome).text_color(c.active || lit ? t.foreground : t.muted)
