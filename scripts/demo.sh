@@ -164,10 +164,6 @@ if [[ -z $theirs || $theirs == "$mine" ]]; then
   exit 1
 fi
 
-# The agents list gets the room its five sections need; the projects list fits below.
-app layout.resize --id agents --weight 1.85 >/dev/null
-app layout.resize --id spaces --weight 1 >/dev/null
-
 fake=$repo/scripts/fake-agent.sh
 # space <folder> <tab name> <state> <app> <delay> [line ...]: a space whose first tab runs a fake agent.
 space() {

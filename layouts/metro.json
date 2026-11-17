@@ -62,6 +62,7 @@
             {
               "id": "spaces",
               "type": "block",
+              "hidden": true,
               "size": {
                 "weight": 1
               },
