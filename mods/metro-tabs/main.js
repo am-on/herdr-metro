@@ -19,6 +19,15 @@ function closePane(pane) {
 }
 import { lookup, staleness, incoming, pull, prColor, prIcon, issueColor, open, openDraft } from "./github.js";
 
+// When a list in metro-prs last loaded: how long ago on the bar ("Updated just now", "Updated 4m ago", "Updated 2h ago", "Updated 3d ago"), the time in its tooltip.
+const ago = (ms) => { const s = (Date.now() - ms) / 1000; return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`; };
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const hhmm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+// GitHub's tab underline orange, light and dark: every tab here is underlined in it, edge to edge, between dividers a
+// step darker than the others.
+const ghColors = () => (settings().dark ? { underline: "#f78166" } : { underline: "#fd8c73" });
+const underline = () => div().size_full().bg(ghColors().underline);
+
 // The Claude Code agent of a space to hand work to: one that isn't working first, then the latest active.
 const claudeIn = (space) => agents().filter((a) => a.space === space && /claude/i.test(a.app ?? ""))
   .sort((a, b) => (a.status === "working") - (b.status === "working") || b.seq - a.seq)[0] ?? null;
@@ -90,6 +99,8 @@ export default class Tabs extends View {
     this.claudeRun = ["claude"];
     cx.spawn(async () => { try { this.claudeRun = (await knownAgents()).find((a) => a.key === "claude")?.run ?? this.claudeRun; } catch {} });
     cx.timer.every(180000, (cx) => { if (this.at) this.fetchGh(this.at, cx); });
+    // How long ago the pull requests view's list loaded is redrawn when its words change.
+    cx.timer.every(15000, (cx) => { if (prsView() && this.synced !== this.syncedText()) cx.notify(); });
     // `metro-tabs.view` (cmd-shift-a in keys.json) switches between the tabs and the agent view; `metro-tabs.overview`
     // (cmd-p) opens and closes the overview of every project; `metro-tabs.scratch` (cmd-n) opens a one-off terminal;
     // `metro-tabs.prs` (cmd-r) and `metro-tabs.issues` (cmd-i) open the pull requests view on that tab of its list
@@ -312,15 +323,35 @@ export default class Tabs extends View {
       .when(["working", "blocked", "done"].includes(st) && news, el => el.child(mark(t, st)));
   }
 
-  // In the pull requests view the bar names the tab on screen; the brand bar's button and the one here lead back.
-  prsBar(t) {
-    const issues = shared("metro-prs.mode") === "issues";
-    return h_flex().id("prs-bar").flex_1().min_w(0).h(28).px(8).gap(8).items_center().text_size(13).text_color(t.foreground)
-      .child(svg(`mods/metro-chrome/icons/${issues ? "circle-dot" : "git-pull-request"}.svg`).size(14).flex_none().text_color(t.muted))
-      .child(div().truncate().child(issues ? "Issues" : "Pull requests"));
+  // The words for how long ago the shown list loaded, or null before it has.
+  syncedText() {
+    const at = shared("metro-prs.bar")?.at?.[shared("metro-prs.mode") === "issues" ? "issues" : "prs"];
+    return at ? ago(at) : null;
   }
 
-  // In the overview the bar names it; the sidebar's button and the one here lead back.
+  // A view's title in the bar is 13px, what's beside it 11px grey.
+  // In the pull requests view the bar names the list on screen, as the overview's names it, then at the right when that
+  // list last loaded (a green check unless that look failed) and Refresh, from shared `metro-prs.bar`. The brand bar's
+  // buttons switch between the lists and lead back.
+  prsBar(t, stop) {
+    const issues = shared("metro-prs.mode") === "issues", mode = issues ? "issues" : "prs", bar = shared("metro-prs.bar") ?? {};
+    const at = bar.at?.[mode], d = at && new Date(at), today = d && d.toDateString() === new Date().toDateString();
+    this.synced = this.syncedText();
+    return h_flex().id("prs-bar").flex_1().min_w(0).h_full().items_center()
+      .child(h_flex().flex_1().min_w(0).h(28).px(8).gap(8).items_center().text_size(13).text_color(t.foreground)
+        .child(svg(`mods/metro-chrome/icons/${issues ? "circle-dot" : "git-pull-request"}.svg`).size(14).flex_none().text_color(t.muted))
+        .child(div().truncate().child(issues ? "Issues" : "Pull requests")))
+      .when(Boolean(at), el => el.child(h_flex().id("prs-updated").mr(6).gap(6).flex_none().items_center().text_size(11).text_color(t.muted)
+        .tooltip(`Updated ${today ? "" : `${MONTHS[d.getMonth()]} ${d.getDate()}, `}${hhmm(d)}`)
+        .child(div().size(12).flex_none().when(!bar.failed?.[mode], el => el.child(svg("mods/metro-chrome/icons/check.svg").size(12).text_color(t.ansi2))))
+        .child(div().child(`Updated ${this.synced}`))))
+      .child(div().id("prs-refresh").size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim)
+        .hover(s => s.bg(t.hover).text_color(t.foreground)).role("button").accessibility_label("Refresh").tooltip("Refresh")
+        .on_mouse_down("left", stop).on_click(() => run("metro-prs.refresh"))
+        .child(svg("mods/metro-chrome/icons/refresh-cw.svg").size(13).when(Boolean(bar.busy), el => el.spin(900))));
+  }
+
+  // In the overview the bar names it, as it names the pull requests view; the brand bar's button (or cmd-p) leads back.
   overviewBar(t) {
     return h_flex().id("overview-bar").flex_1().min_w(0).h(28).px(8).gap(8).items_center().text_size(13).text_color(t.foreground)
       .child(svg("mods/metro-chrome/icons/layout-grid.svg").size(14).flex_none().text_color(t.muted))
@@ -380,7 +411,7 @@ export default class Tabs extends View {
       const doneLive = live.some(a => a.tab === c.id && shownStatus(a) === "done");
       const idle = mine.some(p => p.status != null) && c.status !== "working" && c.status !== "blocked" && !flagged.length && !doneLive;
       const kind = c.status === "working" || c.status === "blocked" ? c.status : flagged.length ? "check" : doneLive ? "done" : idle ? "idle" : null;
-      // Equal-width flat tabs split by hairlines; the active one takes the pane's paper and a dark underline.
+      // Equal-width flat tabs split by hairlines; the active one takes the pane's paper and GitHub's orange underline.
       const row = h_flex().flex_1().min_w(0).px(12).gap(8).items_center()
         // The logo carries the state as a badge; click the bookmark to clear it, or a done badge to keep the agent
         // as Check again.
@@ -397,7 +428,7 @@ export default class Tabs extends View {
         .when(c.active || lit, el => el.child(div().id(`close-${c.id}`).size(18).flex_none().flex().items_center().justify_center().rounded(4)
           .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); closeTab(c.id); }).child(svg("mods/metro-chrome/icons/close.svg").size(12))));
       return v_flex().id(`tab-${c.id}`).w(180).h_full().flex_none().text_size(13)
-        .border_r(1).border_color(t.border)
+        .border_r(1).border_color(c.active || shown[i + 1]?.active ? t.input : t.border)
         .bg(c.active || lit ? t.background : t.chrome).text_color(c.active || lit ? t.foreground : t.muted)
         .on_hover((on, cx) => { if (on) this.hovered = c.id; else if (this.hovered === c.id) this.hovered = null; cx.notify(); })
         .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) dialog("metro-dialog", { ask: "rename", tab: c.id }); })
@@ -407,8 +438,10 @@ export default class Tabs extends View {
           else run("tab.select", { id: c.id });
         })
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "metro-menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
+        // A 2px strip above, as the underline's below, keeps the contents on the bar's middle.
+        .child(div().h(2).flex_none())
         .child(row)
-        .child(div().h(2).flex_none().when(c.active, el => el.bg(t.foreground)).when(!c.active && lit, el => el.bg(t.border)));
+        .child(div().h(2).flex_none().when(c.active, el => el.child(underline())).when(!c.active && lit, el => el.bg(t.border)));
     };
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // The first tab starts at the sidebar's edge, as the terminal below does. Old saved rails and a dragged-narrow
@@ -421,15 +454,15 @@ export default class Tabs extends View {
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? (agentView() ? "agent.prev" : "tab.prev") : (agentView() ? "agent.next" : "tab.next")); })
       .when(Boolean(sidebar?.hidden), el => el.child(this.sidebarToggle(t, stop)))
-      .child(agentView() ? this.agentBar(t, title, live) : prsView() ? this.prsBar(t) : overviewView() ? this.overviewBar(t)
+      .child(agentView() ? this.agentBar(t, title, live) : prsView() ? this.prsBar(t, stop) : overviewView() ? this.overviewBar(t)
         // The + follows the last tab; the tabs scroll and it stays in view.
         : h_flex().flex_1().min_w(0).h_full().items_center()
-          .child(h_flex().id("tab-scroll").min_w(0).h_full().border_l(1).border_color(t.border).overflow_x_scroll().children(shown.map(item)))
-          .child(button("tab-add", svg("mods/metro-chrome/icons/plus.svg").size(14), () => openOverlay({ mod: "metro-new-tab", kind: "popup", width: 220, height: 160, props: { space: space?.id } }))
+          .child(h_flex().id("tab-scroll").min_w(0).h_full().border_l(1).border_color(shown[0]?.active ? t.input : t.border).overflow_x_scroll().children(shown.map(item)))
+          .child(button("tab-add", svg("mods/metro-chrome/icons/plus.svg").size(12), () => openOverlay({ mod: "metro-new-tab", kind: "popup", width: 220, height: 160, props: { space: space?.id } }))
             .ml(6).role("button").accessibility_label("New tab")))
       .children(prsView() || overviewView() ? [] : this.githubLinks(t, stop, cx))
       // The agent view is reached only by its key; while it shows, a button leads back to the tabs.
-      .when(agentView() || prsView() || overviewView(), el => el.child(button("view-toggle", svg("mods/metro-chrome/icons/layers.svg").size(14), agentView() ? switchView : showTabs)
+      .when(agentView(), el => el.child(button("view-toggle", svg("mods/metro-chrome/icons/layers.svg").size(14), switchView)
         .role("button").accessibility_label("Show tabs")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/metro-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/metro-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))

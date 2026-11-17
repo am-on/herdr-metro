@@ -18,6 +18,9 @@ const EVERY = 180000;
 // The list's width: 400px until its edge is dragged (260 to 720), then what it was left at.
 const LIST = 400, LIST_MIN = 260, LIST_MAX = 720;
 const savedWidth = () => { try { return Number(JSON.parse(localStorage.getItem("listWidth") ?? "null")) || LIST; } catch { return LIST; } };
+// What was last loaded, kept across restarts in this copy's localStorage and shown while the next look runs.
+const cached = (key) => { try { return JSON.parse(localStorage.getItem(key) ?? "null"); } catch { return null; } };
+const keep = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
 // Which tab the list shows, pull requests or issues, as it was left; shared, so metro-tabs' keys can pick one.
 const savedMode = () => (shared("metro-prs.mode") === "issues" ? "issues" : "prs");
 // The issues are asked when the Issues tab shows and they're older than this, and on Refresh; the boards at most hourly.
@@ -81,25 +84,27 @@ const VERDICT = {
 const LIGHT = {
   background: "#ffffff", foreground: "#1f2328", muted: "#59636e", dim: "#818b98", border: "#d1d9e0", chrome: "#f6f8fa", hover: "#eff2f5",
   selected: "#ddf4ff", accent: "#0969da", ansi2: "#1a7f37", solid: "#1f883d", blocked: "#d1242f", working: "#9a6700",
-  greenBg: "#dafbe1", redBg: "#ffebe9", counter: "#e1e5e9", rule: "#e4e8ec", underline: "#fd8c73",
+  greenBg: "#dafbe1", redBg: "#ffebe9", counter: "#e1e5e9", rule: "#e4e8ec",
 };
 const DARK = {
   background: "#0d1117", foreground: "#f0f6fc", muted: "#9198a1", dim: "#656c76", border: "#3d444d", chrome: "#151b23", hover: "#262c36",
   selected: "#121d2f", accent: "#4493f8", ansi2: "#3fb950", solid: "#238636", blocked: "#f85149", working: "#d29922",
-  greenBg: "#12261e", redBg: "#25171c", counter: "#2f3742", rule: "#262c36", underline: "#f78166",
+  greenBg: "#12261e", redBg: "#25171c", counter: "#2f3742", rule: "#262c36",
 };
 const palette = () => (settings().dark ? DARK : LIGHT);
 const FAILED = ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"];
 
 export default class Prs extends View {
   init(_props, cx) {
-    this.data = null; // { me, mine, asked } once loaded
+    const prs = cached("prs"), board = cached("issues"), picked = cached("selected") ?? {};
+    this.data = prs?.data ?? null; // { me, mine, asked } once loaded
+    this.at = prs?.at; // when they last loaded
     this.repos = {}; // "owner/repo" -> its main checkout here
     this.rules = [];
     this.loading = false;
     this.error = "";
-    this.sel = null; // the selected pull request's URL
-    this.details = new Map(); // url -> { at: its updatedAt, loading, error, events, checks }
+    this.sel = picked.pr ?? null; // the selected pull request's URL
+    this.details = new Map(Object.entries(cached("details") ?? {})); // url -> { at: its updatedAt, loading, error, events, checks }
     this.avatars = new Set(); // avatar files downloaded, by avatarKey
     this.busy = {}; // url -> true while its checkout opens
     this.errors = {}; // url -> why its checkout didn't open
@@ -111,11 +116,11 @@ export default class Prs extends View {
     this.listWidth = savedWidth();
     this.drag = null; // { x, width } while the list's edge is dragged
     this.mode = savedMode();
-    this.issueList = null; // the board issues, once loaded
-    this.boardList = null; // { me, boards, at }: the boards asked
+    this.issueList = board?.list ?? null; // the board issues, once loaded
+    this.boardList = board?.boards ?? null; // { me, boards, at }: the boards asked
     this.issuesLoading = false;
     this.issueError = "";
-    this.selIssue = null; // the selected issue's URL
+    this.selIssue = picked.issue ?? null; // the selected issue's URL
     this.names = {}; // issue URL -> the branch name typed for it
     this.found = {}; // issue URL -> { branches, base }: what its checkout has for it
     this.typing = false;
@@ -138,8 +143,11 @@ export default class Prs extends View {
     this.branchInput.on("submit", (_e, cx) => { const i = this.issue(); if (i) this.checkOut(i, cx); });
     this.branchInput.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.branchInput.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
-    this.issuesAt = 0; // when the issues last loaded
+    this.issuesAt = board?.at ?? 0; // when the issues last loaded
     this.shown = false; // whether the view was on screen at the last render
+    // The cached lists show their selection at once; the avatars already downloaded too.
+    this.select(this.mode === "issues" ? this.issue() ?? this.issueList?.[0] : this.all().find((pr) => pr.url === this.sel) ?? this.visible()[0], cx);
+    cx.spawn(async (cx) => { for (const a of await cachedAvatars().catch(() => [])) this.avatars.add(a); cx.notify(); });
     this.refreshPrs(cx);
     if (this.mode === "issues") this.refreshIssues(cx);
     // The pull requests keep the brand bar's dot up to date, so they're asked on a timer; the issues only when looked at.
@@ -250,6 +258,7 @@ export default class Prs extends View {
           issue.column = "In Progress";
           this.issueList.sort((a, b) => COLUMNS.indexOf(a.column) - COLUMNS.indexOf(b.column) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
         }
+        this.keepIssues();
       } catch (e) {
         this.warnings[issue.url] = `${e.message ?? e}`;
       }
@@ -306,6 +315,7 @@ export default class Prs extends View {
         this.issueList = list.filter((i) => !skip.has(i.repo.toLowerCase()));
         this.issueError = "";
         this.issuesAt = Date.now();
+        this.keepIssues();
         const sel = this.issue() ?? this.issueList[0];
         this.selIssue = sel?.url ?? null;
         if (sel && this.mode === "issues") this.select(sel, cx);
@@ -333,6 +343,17 @@ export default class Prs extends View {
     });
   }
 
+  keepIssues() {
+    keep("issues", { list: this.issueList, boards: this.boardList, at: this.issuesAt });
+  }
+
+  // The conversations of what the lists still show, without their loading state.
+  keepDetails() {
+    const listed = new Set([...this.all(), ...(this.issueList ?? [])].map((x) => x.url));
+    keep("details", Object.fromEntries([...this.details].filter(([u, d]) => listed.has(u) && d.events)
+      .map(([u, { at, events, checks }]) => [u, { at, events, checks }])));
+  }
+
   issuesIfStale(cx) {
     if (Date.now() - this.issuesAt > ISSUES_EVERY) this.refreshIssues(cx);
   }
@@ -352,6 +373,7 @@ export default class Prs extends View {
         const [data, repos, rules, have] = await Promise.all([pulls(), checkouts(this.folders()), approvalRules(), cachedAvatars()]);
         this.data = data; this.repos = repos; this.rules = rules.rules; this.ruleError = rules.error; this.avatars = have;
         this.error = ""; this.at = Date.now();
+        keep("prs", { data, at: this.at });
         // A hidden one that closed is forgotten.
         const open = new Set(this.all().map((pr) => pr.url)), was = shared("metro-prs.hidden") ?? [];
         if (was.some((u) => !open.has(u))) setShared("metro-prs.hidden", was.filter((u) => open.has(u)));
@@ -394,6 +416,7 @@ export default class Prs extends View {
       try {
         const got = await (pr.kind === "issue" ? issueConversation(pr) : conversation(pr));
         this.details.set(pr.url, { at: pr.updatedAt, loading: false, error: "", ...got });
+        this.keepDetails();
         this.loadAvatars(got.events.map((e) => e.login), cx);
       } catch (e) {
         this.details.set(pr.url, { ...this.details.get(pr.url), loading: false, error: `Couldn't load the conversation: ${e.message ?? e}. Refresh to try again.` });
@@ -410,6 +433,7 @@ export default class Prs extends View {
       this.loadBranches(pr, cx);
     } else this.sel = pr.url;
     this.loadDetail(pr, cx);
+    keep("selected", { pr: this.sel, issue: this.selIssue });
     cx.notify();
   }
 
@@ -734,39 +758,25 @@ export default class Prs extends View {
       .child(svg(ICON("spinner")).size(13).spin(900)).child(text);
   }
 
-  // The list's tabs, GitHub's underline tabs: Pull requests and Issues, each with its count.
-  tab(t, id, label, icon, count) {
-    const on = this.mode === id;
-    return h_flex().id(`tab-${id}`).h_full().relative().px(8).gap(6).flex_none().items_center().text_size(14)
-      .text_color(on ? t.foreground : t.muted).hover((s) => s.text_color(t.foreground))
-      .role("button").accessibility_label(label)
-      .on_click((_e, cx) => { this.handle.focus(); this.setMode(id, cx); })
-      .child(svg(ICON(icon)).size(15).text_color(on ? t.foreground : t.muted))
-      .child(div().child(label))
-      .when(count != null, (el) => el.child(h_flex().h(20).min_w(20).px(6).rounded_full().items_center().justify_center().text_size(12).bg(t.counter).text_color(t.foreground).child(String(count))))
-      .when(on, (el) => el.child(div().absolute().left(2).right(2).bottom(0).h(2).rounded(1).bg(t.underline)));
+  // What the tab bar shows over this view: when each list last loaded and whether that failed, and
+  // whether a look is running. Its tabs and Refresh come back as `metro-prs.pulls`, `.issues` and `.refresh`.
+  bar() {
+    return {
+      at: { prs: this.at ?? null, issues: this.issuesAt || null },
+      failed: { prs: Boolean(this.error), issues: Boolean(this.issueError) },
+      busy: this.loading || this.issuesLoading,
+    };
   }
 
   list(t) {
     const d = this.data, issues = this.mode === "issues";
-    const busy = this.loading || this.issuesLoading;
-    const off = hidden();
-    const head = h_flex().h(46).pl(8).pr(8).gap(2).flex_none().items_center().border_b(1).border_color(t.border)
-      .child(this.tab(t, "prs", "Pull requests", "git-pull-request", d ? this.all().filter((pr) => !off.has(pr.url)).length : null))
-      .child(this.tab(t, "issues", "Issues", "circle-dot", this.issueList?.length))
-      .child(div().flex_1())
-      .child(div().id("refresh").size(26).flex_none().flex().items_center().justify_center().rounded(6)
-        .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .role("button").accessibility_label("Refresh").tooltip(this.at ? `Refresh · updated ${clock(this.at)}` : "Refresh")
-        .on_click((_e, cx) => this.refresh(cx))
-        .child(svg(ICON("refresh-cw")).size(13).when(busy, (el) => el.spin(900))));
     const problems = (issues ? [this.issueError, this.ruleError] : [this.error, this.ruleError]).filter(Boolean)
       .map((text, i) => div().id(`problem-${i}`).px(16).py(4).text_size(12).text_color(t.blocked).child(text));
     const rows = issues ? this.issueRows(t)
       : d ? [...this.section(t, "asked", "Waiting on your review", d.asked, false), ...this.section(t, "mine", "Your pull requests", d.mine, true)]
       : this.loading ? [this.loadingRow(t, "Loading pull requests…")] : [];
     return v_flex().w(this.listWidth).h_full().flex_none().min_h(0).border_r(1).border_color(t.border)
-      .child(head).children(problems)
+      .children(problems)
       .child(div().relative().flex_1().min_h(0)
         .child(v_flex().id(`list-${this.mode}`).size_full().pb(16).overflow_y_scroll().children(rows))
         .when(rows.length > 0, (el) => el.child(div().absolute().top(0).bottom(0).right(0).w(10).child(Scrollbar.vertical(`list-${this.mode}`).size_full().mode("always")))));
@@ -1110,6 +1120,9 @@ export default class Prs extends View {
     // A key picked the other tab.
     const want = savedMode();
     if (want !== this.mode) cx.timer.after(0, (cx) => this.setMode(want, cx));
+    // The tab bar follows; render can't set shared state itself.
+    const bar = JSON.stringify(this.bar());
+    if (bar !== this.barSent) { this.barSent = bar; cx.timer.after(0, () => setShared("metro-prs.bar", JSON.parse(bar))); }
     // Dragging the list's right edge sets its width.
     const edge = div().id("list-edge").w(5).ml(-3).h_full().flex_none().cursor_col_resize().hover((s) => s.bg(t.accent + "55"))
       .when(Boolean(this.drag), (el) => el.bg(t.accent + "55"))
