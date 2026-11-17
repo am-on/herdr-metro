@@ -118,7 +118,7 @@
                           "mod": "metro-pane"
                         },
                         "reveal": "always",
-                        "height": 28,
+                        "height": 36,
                         "position": "top"
                       },
                       "background": "background",

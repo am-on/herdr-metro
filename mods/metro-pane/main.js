@@ -1,7 +1,7 @@
 // A pane's header, for layouts that frame their panes:
 //   { "tab": "active", "pane": { "header": { "content": { "mod": "metro-pane" } } } }
 // Shows the program's icon (the app's program table), the agent's name or
-// the terminal's title, the folder, and the agent's status; buttons split, zoom and close
+// the terminal's title, the folder, and the agent's status; buttons split, zoom and close (a review's header is its toolbar: its mode switch and counts, without them)
 // this pane. Alone in its tab, a terminal's header says only what the tab doesn't: its folder and branch.
 // Props from the app: { pane, terminal }. Click: focus the pane.
 
@@ -78,8 +78,8 @@ export default class Pane extends View {
       .child(svg(icon).size(14));
   }
 
-  // A review pane's header carries its Uncommitted / Last commit / Branch switch over the file list, and Refresh; the review
-  // publishes its state in `metro-review.<tab>` and takes the clicks as `metro-review.<command>`.
+  // A review pane's header carries its Uncommitted / Last commit / Branch switch over the file list and what it shows; the
+  // review keeps itself current, publishes its state in `metro-review.<tab>` and takes the clicks as `metro-review.<command>`.
   review(t, p) {
     const r = shared(`metro-review.${p.tab}`);
     if (!r) return null;
@@ -104,12 +104,6 @@ export default class Pane extends View {
             .child(div().min_w(0).truncate().child(label));
         })),
       r.files > 0 && this.diffstat(t, r),
-      div().flex_1(),
-      div().id(`ph-refresh-${p.pane}`).h(22).px(8).flex().flex_none().items_center().rounded(6).text_size(12).text_color(t.muted).cursor_pointer()
-        .hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_mouse_down("left", stop)
-        .on_click((_e, cx) => { cx.stop_propagation(); run("metro-review.refresh"); })
-        .child("Refresh"),
     ].filter(Boolean);
   }
 
@@ -177,7 +171,8 @@ export default class Pane extends View {
         .when(Boolean(kind), el => el.child(badge(t, kind, t.background).accessibility_label(LABEL[kind])))))
       .when(!toolbar && !where, (el) => el.child(div().flex_none().truncate().max_w(260).text_size(13).font_medium().text_color(p.focused ? t.foreground : t.muted).child(name))
         .child(div().flex_1().truncate().text_color(t.dim).child(folder(p.cwd))))
-      .when(this.hovered, el => el.child(h_flex().flex_none().gap(4).items_center()
+      // A review's header is its toolbar: no pane buttons appear there to crowd it (its tab's × closes it).
+      .when(this.hovered && !toolbar, el => el.child(h_flex().flex_none().gap(4).items_center()
         .when(canMark, el => el.child(this.button(t, `ph-c-${pane}`, `mods/metro-chrome/icons/${marked ? "bookmark-filled" : "bookmark"}.svg`, marked ? "Clear Check again" : "Check again later", () => setCheck(p.terminal, !marked))))
         .child(this.button(t, `ph-r-${pane}`, "mods/metro-pane/split-right.svg", "Split right", () => run("pane.split", { direction: "right", pane })))
         .child(this.button(t, `ph-d-${pane}`, "mods/metro-pane/split-down.svg", "Split down", () => run("pane.split", { direction: "down", pane })))

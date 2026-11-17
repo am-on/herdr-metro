@@ -9,6 +9,8 @@ import { SYNTAX, highlight } from "./syntax.js";
 // Reads write nothing under .git, so the folder watch doesn't wake on its own refresh.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const MAX_LINES = 2000;
+// A line longer than this is drawn as plain text: a box per word, as colored lines take, would be too many to draw in time.
+const LONG_LINE = 1000;
 const ROW = 20;
 const MODES = [{ id: "uncommitted", label: "Uncommitted" }, { id: "last", label: "Last commit" }, { id: "branch", label: "Branch" }];
 // Agents Send can start, in a new tab with the comments as their first message; programs.json's `run` wins once known.
@@ -262,12 +264,11 @@ export default class Review extends View {
       try { for (const a of await knownAgents({ on: where().on })) this.known[a.key] = a; } catch {}
       cx.notify();
     });
-    // The pane header's switch and Refresh run `metro-review.uncommitted`, `.last`, `.branch` and `.refresh`.
+    // The pane header's switch runs `metro-review.uncommitted`, `.last` and `.branch`.
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
-        if (c === "refresh") this.refresh(cx);
-        else if (MODES.some((m) => m.id === c)) this.setMode(c, cx, true);
+        if (MODES.some((m) => m.id === c)) this.setMode(c, cx, true);
       }
     });
     this.refresh(cx);
@@ -750,7 +751,11 @@ export default class Review extends View {
         }
         const sent = new Set(list.map((c) => c.id));
         this.setMine(this.mine().filter((c) => !sent.has(c.id)));
-        if (to.agent) notify({ title: `Sent ${count}`, body: `To ${to.label}. Click to watch it work.`, level: "success", action: { name: "agent.focus", args: { terminal: to.agent.address } } });
+        // The agent that got them is shown at once, as a click on it in the agents list shows it.
+        const pane = to.agent && panes().find((p) => p.terminal === to.agent.address);
+        if (pane) { run("tab.select", { id: pane.tab }); run("pane.focus", { pane: pane.pane }); }
+        else if (to.agent) run("agent.focus", { terminal: to.agent.address });
+        if (to.agent) notify({ title: `Sent ${count}`, body: `To ${to.label}.`, level: "success", action: { name: "agent.focus", args: { terminal: to.agent.address } } });
         else notify({ title: `Started ${to.starter.name} with ${count}`, body: "In a new tab of this space.", level: "success" });
       } catch (e) {
         const what = to.agent ? `send the comments to ${to.label}` : `start ${to.starter.name}`;
@@ -842,7 +847,7 @@ export default class Review extends View {
   code(row, mark, line = false, current = -1) {
     const text = row.text, base = div().flex_1().min_w(0).pr(12).line_height(`${ROW}px`);
     const changed = row.mark && mark ? row.mark : null, hits = findIn(text, this.needle()), tokens = row.tokens ?? [];
-    if (!changed && !hits.length && !tokens.length) return line ? base.truncate().child(text) : base.child(text);
+    if ((!changed && !hits.length && !tokens.length) || text.length > LONG_LINE) return line ? base.truncate().child(text) : base.child(text);
     const look = settings().dark ? "dark" : "light", colors = SYNTAX[look];
     const cuts = [...new Set([0, text.length, ...(changed ?? []), ...hits.flat(), ...tokens.flatMap(([a, b]) => [a, b])])].sort((a, b) => a - b);
     const words = [];
