@@ -570,15 +570,16 @@ export default class Agents extends View {
       return h_flex()
         .id(g.id)
         .px(8)
-        .when(i > 0, (el) => el.pt(8))
-        .h(i > 0 ? 32 : 24)
+        // 34px above every section but the first: the card above's 10px of padding, 14px between cards, this card's 10px.
+        .when(i > 0, (el) => el.pt(34))
+        .h(i > 0 ? 58 : 24)
         .flex_none()
         .gap(6)
         .items_center()
         .text_size(11)
         // Working is green, as its spinner; Idle's theme color is a faint grey meant for marks, so its header is a dark grey.
         .child(headingMark(t, g.status))
-        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_size(13).text_color({ check: t.accent, working: t.ansi2, idle: t.foreground + "bb", review: t.foreground + "bb", terminal: t.foreground + "bb" }[g.status] ?? t[g.status] ?? t.dim).child(g.label))
+        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_size(14).text_color({ check: t.accent, working: t.ansi2, idle: t.foreground + "bb", review: t.foreground + "bb", terminal: t.foreground + "bb" }[g.status] ?? t[g.status] ?? t.dim).child(g.label))
         // A count only where the rows don't show it at a glance: past five. Ringed, as Spaces' hidden worktrees.
         .when(g.members.length > 5, (el) => el.child(div().size(22).flex_none().rounded_full().border(1).border_color(t.border)
           .flex().items_center().justify_center().text_size(11).text_color(t.muted).child(String(g.members.length))));
@@ -599,7 +600,7 @@ export default class Agents extends View {
     const fillOf = (a) => { const c = colors[projectOf(a).lead] ?? "ansi6"; return c.startsWith("#") ? c : MARK[c] ?? t[c]; };
     const spaceTitle = (g, a, first) => {
       const fill = fillOf(a), name = projectOf(a).name || "", letter = [...(projectOf(a).initial ?? name)][0]?.toUpperCase() ?? "?";
-      return h_flex().id(`${g.id}-${projectOf(a).key}-${a.address}`).h(first ? 24 : 32).pt(first ? 0 : 8).pl(8).pr(10).gap(10).flex_none().items_center()
+      return h_flex().id(`${g.id}-${projectOf(a).key}-${a.address}`).h(first ? 28 : 32).pt(first ? 4 : 8).pl(8).pr(10).gap(10).flex_none().items_center()
         // The same avatar as Projects: 18px, 5px corners, an 11px letter, 8px in.
         .child(div().size(18).flex_none().rounded(5).bg(fill).flex().items_center().justify_center().text_size(11)
           .text_color(fill?.startsWith("#") ? ink(fill) : "#ffffff").child(letter))
@@ -608,7 +609,9 @@ export default class Agents extends View {
     // The list is laid out by hand: every heading, project title, rail and row is a box at its own `top`, keyed so the
     // same box moves when its agent changes section, and slides there.
     const items = [];
-    const put = (key, make, est, left = 0) => items.push({ key, make, est, left });
+    // Each box knows its section (`sec`, the section's status); `spans` are each section's first and last item.
+    let sec = null; const spans = [];
+    const put = (key, make, est, left = 0) => items.push({ key, make, est, left, sec });
     // A section's agents in runs of one project each, every run named by its section and project.
     const runsOf = (g, as) => {
       const runs = [];
@@ -624,7 +627,7 @@ export default class Agents extends View {
     const bySpace = (g, as) => {
       runsOf(g, as).forEach(({ run, name }, ri) => {
         const key = runKey.get(name);
-        put(`title-${key}`, () => spaceTitle(g, run[0], ri === 0), ri === 0 ? 24 : 32);
+        put(`title-${key}`, () => spaceTitle(g, run[0], ri === 0), ri === 0 ? 28 : 32);
         // A title is always this tall, so one that moves to a section's first place or away from it slides there at once.
         items.at(-1).fixed = true;
         const from = items.length;
@@ -634,16 +637,19 @@ export default class Agents extends View {
           put(`ag-${a.address}`, () => row(a, i, subs), branchOf.get(a.address) ? 54 : 32, 26);
           if (!this.isFolded(a.address)) for (const sub of subs) put(`sub-${sub.t.address}`, () => this.subRow(t, sub, shown), 32, 26);
         });
-        items.push({ key: `rail-${key}`, rail: true, from, to: items.length - 1, color: fillOf(run[0]) + "73" });
+        items.push({ key: `rail-${key}`, rail: true, from, to: items.length - 1, color: fillOf(run[0]) + "73", sec });
       });
     };
     groups.forEach((g, i) => {
-      put(`head-${g.id}`, () => header(g, i), i > 0 ? 32 : 24);
+      sec = g.status; const span = { g, i, from: items.length }; spans.push(span);
+      put(`head-${g.id}`, () => header(g, i), i > 0 ? 58 : 24);
       if (!SHORT.has(g.id) || g.members.length <= IDLE_SHOWN) return bySpace(g, g.members);
       bySpace(g, shownOf(g));
       put(`${g.id}-more`, () => more(g, g.members.length - IDLE_SHOWN), 28);
     });
-    let y = 0;
+    for (let s = 0; s < spans.length; s++) spans[s].to = (spans[s + 1]?.from ?? items.length) - 1;
+    // The first heading sits 18px down: the first section's card starts 8px under the bar above, as far as from the sides.
+    let y = 18;
     const heightOf = (it) => (it.fixed ? it.est : this.heights[it.key] ?? it.est);
     for (const it of items) if (!it.rail) { it.top = y; y += heightOf(it); }
     // A rail runs from 2px above its first row to 4px above the end of its last.
@@ -653,6 +659,23 @@ export default class Agents extends View {
       it.h = last.top + heightOf(last) - first.top - 2;
     }
     const height = y;
+    // Each section sits on a light card, a third of the way from white to the sidebar's grey, tinted 4% with its color (7%
+    // for Working, the one to watch), mixed solid: rows are opaque boxes so a sliding one hides what it passes, and they
+    // take the card's color.
+    const SEC_COLOR = { blocked: t.blocked, working: t.ansi2, check: t.accent, done: t.done, idle: t.foreground, terminal: t.foreground, review: t.ansi5 };
+    const mix = (a, b, f) => { const p = (h, i) => parseInt(h.slice(1 + 2 * i, 3 + 2 * i), 16); return "#" + [0, 1, 2].map((i) => Math.round(p(a, i) * (1 - f) + p(b, i) * f).toString(16).padStart(2, "0")).join(""); };
+    const secBg = (s) => mix(mix(t.background, t.chrome, 0.33), SEC_COLOR[s] ?? t.foreground, s === "working" ? 0.07 : 0.04);
+    const secEdge = (s) => mix(t.chrome, SEC_COLOR[s] ?? t.foreground, s === "working" ? 0.2 : 0.12);
+    const bands = spans.map(({ g, i, from, to }) => {
+      const head = items[from], last = items.slice(from, to + 1).filter((it) => !it.rail).at(-1);
+      // A card has 10px of padding above its heading and under its last row (the heading's box holds the space above it), the
+      // first 8px under the list's top. It runs 8px from both sides of the sidebar, under the scrollbar's lane on the
+      // right, edged in its color a step stronger than its fill.
+      const top = head.top + (i > 0 ? 24 : -10), bottom = last.top + heightOf(last) + 10;
+      return div().id(`band-${g.id}`).absolute().left(-2).right(-7).top(top).h(bottom - top).rounded(8).bg(secBg(g.status))
+        .border(1).border_color(secEdge(g.status))
+        .transition("top", MOVE).transition("height", MOVE);
+    });
 
     // What left the list fades where it was; what arrived fades in once it has been drawn invisible.
     const keys = new Set(items.map((it) => it.key));
@@ -678,7 +701,7 @@ export default class Agents extends View {
       if (it.rail) return div().id(`box-${it.key}`).absolute().left(16).top(it.top).w(2).h(Math.max(0, it.h)).rounded(1).bg(it.color)
         .opacity(shown ? 1 : 0).transition("top", move).transition("height", move).transition("opacity", fade);
       // Boxes are opaque in the sidebar's color, so one sliding past another hides behind it rather than through it.
-      return div().id(`box-${it.key}`).absolute().left(it.left).right(0).top(it.top).bg(t.chrome)
+      return div().id(`box-${it.key}`).absolute().left(it.left).right(0).top(it.top).bg(it.key.startsWith("head-") ? "#00000000" : it.sec ? secBg(it.sec) : t.chrome)
         .opacity(shown ? 1 : 0).transition("top", move).transition("opacity", fade)
         .on_size_change((size, cx) => {
           if (it.fixed) return;
@@ -694,6 +717,7 @@ export default class Agents extends View {
     const moving = (it) => now - (this.movedAt[it.key.replace(/^(ag|title|rail)-/, "")] ?? -Infinity) < MOVE.duration + 200;
     const layer = (it) => (it.rail ? 0 : it.key.startsWith("ag-") || it.key.startsWith("sub-") ? 2 : 1) + (moving(it) ? 3 : 0);
     const boxes = [
+      ...bands,
       ...[...this.ghosts.values()].map((it) => box(it, true)),
       ...[0, 1, 2, 3, 4, 5].flatMap((l) => items.filter((it) => layer(it) === l).map((it) => box(it, false))),
     ];
@@ -705,13 +729,12 @@ export default class Agents extends View {
       .bg(t.chrome)
       .text_size(13)
       // No heading: the sections say what the list is. The line between this list and Projects is the layout's divider.
-      .pt(10)
       .when(list.length === 0 && !others.length, (el) =>
         el.child(div().px(16).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
       // The list scrolls beside an always-visible 10px bar on its right edge, 5px clear of it.
       .child(div().relative().flex_1().min_h(0)
-        .child(v_flex().id("ag-list").size_full().pl(8).pr(15).overflow_y_scroll()
+        .child(v_flex().id("ag-list").size_full().pl(10).pr(15).overflow_y_scroll()
           .child(div().relative().w_full().h(height).flex_none().children(boxes)))
         .child(div().absolute().top(0).bottom(0).right(0).w(10).child(Scrollbar.vertical("ag-list").size_full().mode("always"))));
   }

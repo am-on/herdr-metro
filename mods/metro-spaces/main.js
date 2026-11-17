@@ -396,7 +396,7 @@ export default class Spaces extends View {
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       // Bold, as the agents list titles its sections, a size up as the heading of the half; the first project sits right under it.
       .child(h_flex().id("spaces-heading").mt(6).h(32).flex_none().pl(16).pr(10).items_center().justify_between().text_size(13).text_color(t.dim)
-        .child(div().text_size(13).font_family(BOLD).font_weight(700).text_color(t.muted).child("Projects"))
+        .child(div().text_size(14).font_family(BOLD).font_weight(700).text_color(t.muted).child("Projects"))
         .child(h_flex().gap(2).items_center()
         .child(this.overviewButton(t))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).role("button").accessibility_label("New space").hover(s => s.bg(t.hover).text_color(t.foreground))

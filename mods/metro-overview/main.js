@@ -597,12 +597,12 @@ export default class Overview extends View {
           if (this.dropAt?.col !== col || this.dropAt?.index !== keys.length) { this.dropAt = { col, index: keys.length }; cx.notify(); }
         }));
     };
-    const heading = (text) => div().text_size(13).font_family(BOLD).font_weight(700).text_color(t.muted).child(text);
+    const heading = (text) => div().text_size(14).font_family(BOLD).font_weight(700).text_color(t.muted).child(text);
     // A column's width, from the cards' row as last laid out.
     const colW = ((this.area ?? this.width - 45) - (cols - 1) * GAP) / cols;
     const recent = this.recentRow(tree, ctx, t, cols, Math.max(0, colW));
     const ghost = dragging && this.pointer && byKey.get(this.drag.key);
-    return div().id("overview").relative().size_full().min_h(0).bg(t.chrome)
+    return div().id("overview").relative().size_full().min_h(0).bg(t.chrome).border_t(1).border_color(t.border)
       .track_focus(this.editKeys)
       .on_key_down((e, cx) => {
         if (e.key !== "escape" || !this.editing || this.renaming) return;
@@ -624,7 +624,8 @@ export default class Overview extends View {
         cx.notify();
       })
       .child(v_flex().id("overview-scroll").size_full().overflow_y_scroll()
-        .child(v_flex().w_full().min_h_full().flex_none().p(20).pr(25).gap(12)
+        // The page's first heading sits on the line of the sidebar's first heading.
+        .child(v_flex().w_full().min_h_full().flex_none().p(20).pt(16.5).pr(25).gap(12)
           .when(Boolean(recent), (el) => el.child(heading("Recent")).child(recent).child(div().h(8)))
           // The heading, then right after it a + to add a project.
           .child(h_flex().items_center().gap(6)
