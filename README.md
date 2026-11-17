@@ -81,6 +81,16 @@ Herdr draws its own Claude and Codex icons. For the logos in the screenshots, ad
     "codex": { "icon": "mods/metro-chrome/icons/openai.svg", "tint": true } } }
 ```
 
+### Sounds
+
+`sounds/` has calmer alerts than Herdr's own: a soft blip when an agent is done, and two rising synth chords when it needs you. To use them, copy the folder with `cp -R sounds ~/.config/herdr-app/` and add this to `~/.config/herdr-app/settings.json`:
+
+```json
+"sounds": { "enabled": true, "done": "sounds/done.mp3", "blocked": "sounds/blocked.mp3" }
+```
+
+`scripts/agent-sounds.py` builds them. It needs `uv` and `ffmpeg`.
+
 ## Screenshots
 
 The screenshots come from a demo window, not anyone's real work: `scripts/demo.sh` opens a second Herdr window with its own home, herdr-core session and `HOME`, clones express and flask, starts made-up agents in every state and seeds made-up usage. Your own window and terminals are never touched.
