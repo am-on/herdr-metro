@@ -510,11 +510,11 @@ export default class Agents extends View {
     };
     const homeDir = home();
     const tilde = (dir) => (dir && homeDir && (dir === homeDir || dir.startsWith(homeDir + "/")) ? "~" + dir.slice(homeDir.length) : dir);
-    // Two lines, as an agent's: a review's name, then what it compares and its size; a terminal's program or title, then its branch or folder.
+    // Two lines, as an agent's: the tab's given name, else Review or the terminal's program or title; then what a review compares and its size, or a terminal's branch or folder.
     const otherRow = (x) => {
       const { p } = x, review = x.kind === "review", hovered = this.hovered === x.address;
       const tab = tabOf.get(p.tab), sum = review ? shared(`metro-review.${p.tab}`) : null;
-      const name = review ? (tab?.named ? tab.name : "Review") : label(p);
+      const name = tab?.named ? tab.name : review ? "Review" : label(p);
       const pic = review ? svg("mods/metro-chrome/icons/git-compare.svg").size(14).flex_none().text_color(t.foreground)
         : icon(p.program, 14, t.foreground) ?? svg("mods/metro-chrome/icons/terminal.svg").size(14).flex_none().text_color(t.foreground);
       const files = sum?.files != null ? ` · ${sum.files} file${sum.files === 1 ? "" : "s"}` : "";
