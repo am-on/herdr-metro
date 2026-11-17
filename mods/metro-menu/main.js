@@ -1,12 +1,12 @@
 // Context menus (Herdr's items, cloned from its `menu`). Opened as a popup with
-// props { tab: "pane" | "tab" | "space" | "global", target }.
-// ↑/↓ move, Enter runs, Esc closes. An item is [label, command, args]; a command
+// props { tab: "pane" | "tab" | "space" | "project" | "global", target }.
+// ↑/↓ move, Enter runs, Esc closes. An item is [label, command, args, icon?]; a command
 // "worktree" opens metro-worktree, and Rename and the Closes that would end a space
 // ask in metro-dialog, so every dialog is a metro card.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec, knownAgents, setShared } from "herdr";
 
 // Metro's dialogs open frameless at one size and draw their own card, as in metro-tabs, metro-spaces and metro-overview.
 const dialog = (mod, p) => openOverlay({ mod, kind: "dialog", frame: "none", width: 640, height: 0.9, props: p });
@@ -76,6 +76,22 @@ function items(p, git) {
         ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
+    // The overview's project cards and worktrees: open there with an agent or a terminal, a new worktree, rename, color
+    // and close the project, close the worktree's space, remove the worktree.
+    // target: { open?, machine?, create?: { label, worktree? | folder? }, project?: { key, swatch, color, dismiss }, close?, remove? }.
+    case "project":
+      return [
+        ...(tg.open ? [
+          ["Open with Claude Code", "open", { agent: "claude" }, "claude"],
+          ["Open with Codex", "open", { agent: "codex" }, "openai"],
+          ["Open a terminal", "open", {}, "terminal"],
+        ] : []),
+        ...(tg.create ? [[tg.create.label, "project.create", {}, "plus"]] : []),
+        ...(tg.project ? [["Rename", "project.rename", {}, "pencil"], ["Change color", "project.color", {}, "color"]] : []),
+        ...(tg.project ? [[tg.project.dismiss, "project.dismiss", {}, "x"]] : []),
+        ...(tg.close ? [["Close", "space.close", { id: tg.close }, "x"]] : []),
+        ...(tg.remove ? [["Remove worktree", "worktree", { ...tg.remove, action: "remove" }, "trash"]] : []),
+      ];
     default:
       return [
         ["New space", "space.new", {}],
@@ -88,7 +104,11 @@ function items(p, git) {
   }
 }
 
-function menuIcon(command) {
+// The project menu's groups, a line between them: open, change, close.
+const group = (it) => it[1] === "open" ? 0 : it[1] === "project.dismiss" || it[1] === "space.close" || it[1] === "worktree" ? 2 : 1;
+
+function menuIcon(command, icon) {
+  if (icon) return `mods/metro-chrome/icons/${icon}.svg`;
   const name = command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "pencil" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
   return `mods/metro-chrome/icons/${name}.svg`;
 }
@@ -99,6 +119,18 @@ function shortcut(name, args) {
   const value = args && Object.values(args)[0];
   const k = keys().find((b) => b.section === "global" && (b.action === name || b.action === `${name}:${value}`));
   return k ? k.keys : "";
+}
+
+// A space opens in the folder with the agent as its first tab, started as the + menu starts it (programs.json's `run`),
+// or a shell; the work area goes back from the overview to the tabs.
+function openThere(tg, agent) {
+  const on = tg.machine ? { machine: tg.machine } : {};
+  const start = (argv) => {
+    run("layout.select", { stack: "view", child: "main" });
+    run("space.new", { folder: tg.open, ...(argv ? { argv } : {}), ...on });
+  };
+  if (!agent) return start(null);
+  knownAgents({ on: tg.machine }).then((list) => start(list.find((k) => k.key === agent)?.run ?? [agent]), () => start([agent]));
 }
 
 export default class Menu extends View {
@@ -127,6 +159,17 @@ export default class Menu extends View {
     else if (it[1] === "space.close") dialog("metro-dialog", { ask: "close", spaces: [it[2].id] });
     else if (it[1] === "tab.close") closeTab(it[2].id);
     else if (it[1] === "pane.close") closePane(it[2].pane);
+    else if (it[1] === "open") openThere(props().target, it[2].agent);
+    else if (it[1] === "project.rename" || it[1] === "project.dismiss") {
+      setShared("metro-overview.menu", { key: props().target.project.key });
+      run(`metro-overview.${it[1] === "project.rename" ? "rename" : "dismiss"}`);
+    }
+    else if (it[1] === "project.create") {
+      const c = props().target.create;
+      if (c.worktree) dialog("metro-worktree", c.worktree);
+      else run("space.new", { folder: c.folder, ...(props().target.machine ? { machine: props().target.machine } : {}) });
+    }
+    else if (it[1] === "project.color") openOverlay({ mod: "metro-space-color", kind: "popup", width: 304, height: 84, props: props().target.project.color });
     else run(it[1], it[2]);
   }
 
@@ -152,7 +195,7 @@ export default class Menu extends View {
       .children(
         list.map((it, i) =>
           v_flex()
-            .when(i > 0 && (it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
+            .when(i > 0 && (props()?.tab === "project" ? group(list[i - 1]) !== group(it) : it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
             .child(h_flex()
             .id(`mi-${i}`)
             .h(31)
@@ -165,7 +208,8 @@ export default class Menu extends View {
             .when(i === this.at, (el) => el.bg(t.selected))
             .hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => this.choose(i, cx))
-            .child(svg(menuIcon(it[1])).size(14).flex_none().text_color(t.muted))
+            .child(it[3] === "color" ? div().size(14).flex_none().flex().items_center().justify_center().child(div().size(10).rounded_full().bg(props().target.project?.swatch ?? t.muted))
+              : svg(menuIcon(it[1], it[3])).size(14).flex_none().text_color(t.muted))
             .child(div().flex_1().child(it[0]))
             .child(div().text_size(11).text_color(t.dim).child(shortcut(it[1], it[2])))),
         ),

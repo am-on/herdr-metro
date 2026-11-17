@@ -3,14 +3,12 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Button, Scrollbar } from "gpui-base";
-import { agents, terminals, panes, spaces, focused, run, hc, home, theme, shared, setShared, setAgentOrder, layout, openOverlay } from "herdr";
+import { agents, terminals, panes, spaces, focused, run, hc, home, theme, shared, setShared, setAgentOrder, layout } from "herdr";
 
-// Closing a space's last tab's last pane closes the space: that asks in metro-dialog (frameless, as every metro dialog);
-// any other pane closes at once.
+// The list's × closes without asking, even a space's last pane, which closes the space (its folder and worktree stay).
 function closePane(pane) {
   const ps = panes(), p = ps.find((x) => x.pane === pane), s = p && spaces().find((x) => (x.tabs ?? []).some((c) => c.id === p.tab));
-  if (s?.tabs.length === 1 && ps.filter((x) => x.tab === p.tab).length === 1)
-    openOverlay({ mod: "metro-dialog", kind: "dialog", frame: "none", width: 640, height: 0.9, props: { ask: "close", spaces: [s.id] } });
+  if (s?.tabs.length === 1 && ps.filter((x) => x.tab === p.tab).length === 1) run("space.close", { id: s.id, confirmed: true });
   else run("pane.close", { pane });
 }
 import { namer } from "./name.js";

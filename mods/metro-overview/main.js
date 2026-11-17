@@ -4,7 +4,7 @@
 // are live from Herdr.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { spaces, panes, agents, terminals, run, openOverlay, pickFolder, theme, shared, setShared, layout, settings, exec, home, appHome, readTextFile, knownAgents } from "herdr";
+import { spaces, panes, agents, terminals, run, openOverlay, pickFolder, theme, shared, setShared, layout, settings, exec, home, appHome, readTextFile, knownAgents, nextCommand } from "herdr";
 
 // Metro's dialogs open frameless at one size and draw their own card, as in metro-menu and metro-tabs.
 const dialog = (mod, p) => openOverlay({ mod, kind: "dialog", frame: "none", width: 640, height: 0.9, props: p });
@@ -85,6 +85,9 @@ export default class Overview extends View {
   init(_props, cx) {
     this.width = 0;
     this.hovered = null;
+    // Edit mode: cards move by their heading and names rename on a click; otherwise neither happens by accident.
+    this.editing = false;
+    this.editKeys = cx.focus_handle();
     this.hoveredBox = null;
     // The Recent row as it was when the overview opened, kept while it shows; a hidden copy doesn't render, so the
     // timer lets go of it (and of a drag) once the overview is gone.
@@ -96,7 +99,7 @@ export default class Overview extends View {
     cx.timer.every(500, (cx) => {
       if (onScreen()) return;
       this.recent = null;
-      if (this.drag) { this.drag = null; this.dropAt = null; cx.notify(); }
+      if (this.drag || this.editing) { this.drag = null; this.dropAt = null; this.editing = false; cx.notify(); }
     });
     // One-click actions per project folder, from the untracked metro-actions.json here; read again while on screen,
     // so an edit to it shows.
@@ -110,6 +113,17 @@ export default class Overview extends View {
     this.nameInput = InputState.new({ placeholder: "Project name" });
     this.nameInput.on("submit", (_e, cx) => this.finishRename(true, cx));
     this.nameInput.on("blur", (_e, cx) => this.finishRename(true, cx));
+    // metro-menu's Rename and Close name the project in shared `metro-overview.menu`, then send `metro-overview.rename`
+    // or `metro-overview.dismiss`.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        const key = shared("metro-overview.menu")?.key, p = key && (shared("projects.tree") ?? []).find((x) => x.key === key);
+        if (!p) continue;
+        if (c === "rename") this.startRename(p, cx);
+        else if (c === "dismiss") this.dismiss(p);
+      }
+    });
   }
 
   // Which worktrees' branches are done: their latest pull request merged. One GitHub query asks only about the
@@ -192,6 +206,45 @@ export default class Overview extends View {
     if (a.run) return start(a.run);
     // An agent starts as the + menu starts it (programs.json's `run`).
     knownAgents({ on: p.machine }).then((list) => start(list.find((k) => k.key === a.agent)?.run ?? [a.agent]), () => start([a.agent]));
+  }
+
+  // A closed worktree or project opens as a space with Claude Code as its first tab, started as the + menu starts it
+  // (programs.json's `run`).
+  openWithClaude(folder, machine) {
+    const start = (argv) => {
+      run("layout.select", { stack: "view", child: "main" });
+      run("space.new", { folder, argv, ...(machine ? { machine } : {}) });
+    };
+    knownAgents({ on: machine }).then((list) => start(list.find((k) => k.key === "claude")?.run ?? ["claude"]), () => start(["claude"]));
+  }
+
+  // A project's or worktree's right-click menu, in metro-menu: open there with Claude Code, Codex or a terminal
+  // (`open`), a new worktree (`create`), rename, recolor or close the project (`project`), close the worktree's space
+  // (`close`), remove the worktree (`remove`). Sized to its items, a line between their groups.
+  menu(target) {
+    const groups = [target.open ? 3 : 0, (target.create ? 1 : 0) + (target.project ? 2 : 0),
+      (target.project ? 1 : 0) + (target.close ? 1 : 0) + (target.remove ? 1 : 0)].filter(Boolean);
+    const n = groups.reduce((a, b) => a + b, 0);
+    openOverlay({ mod: "metro-menu", kind: "popup", width: 220, height: n * 31 + (groups.length - 1) * 9 + 12, props: { tab: "project", target } });
+  }
+
+  // A project card's menu: a new worktree (or a space in a plain folder), rename, color, close (or forget a closed one).
+  projectMenu(p, t) {
+    const on = p.machine ? { machine: p.machine } : {};
+    this.menu({
+      ...(p.closed ? { open: p.closed.path } : {}), ...on,
+      create: p.folder ? { label: "New space in this folder", folder: p.folder }
+        : { label: "New worktree", worktree: p.closed ? { folder: p.closed.path, ...on, action: "new" } : { space: p.space, action: "new" } },
+      project: { key: p.key, swatch: fill(t, p.color), color: p.closed ? { key: p.key } : { space: p.space },
+        dismiss: p.closed ? "Remove from the list" : "Close project" },
+    });
+  }
+
+  // What a click on a closed worktree or project does, shown on hover in a spot kept at rest, so nothing moves.
+  claudeHint(lit, t) {
+    return h_flex().w(124).flex_none().items_center().justify_end()
+      .when(lit, (el) => el.child(h_flex().h(24).px(9).gap(5).items_center().rounded_full().bg(t.hover).text_size(12).text_color(t.foreground)
+        .child(image("mods/metro-chrome/icons/claude.svg").size(12).flex_none()).child("Open in Claude")));
   }
 
   // A project's actions as small buttons: the agent's logo or a terminal, then the name.
@@ -299,18 +352,14 @@ export default class Overview extends View {
     const id = `wt-${row.space ?? row.path}`, lit = this.hoveredBox === id;
     const on = project.machine ? { machine: project.machine } : {};
     const mono = settings().font ?? "JetBrains Mono";
-    // × closes its space and keeps the worktree; the trash asks to remove the worktree, its space too. The main
-    // checkout can't be removed. Both keep their place while hidden.
-    const button = (key, icon, label, action) => div().id(`${id}-${key}`).size(22).flex_none().flex().items_center().justify_center().rounded(5)
-      .when(lit && Boolean(action), (el) => el.text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .role("button").accessibility_label(label).tooltip(label)
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { cx.stop_propagation(); action(); })
-        .child(svg(icon).size(13)));
+    // Its right-click menu closes its space (the worktree stays) and removes the worktree, its space too; the main
+    // checkout can't be removed. A closed one's also opens it with Claude Code, Codex or a terminal.
     const folder = project.scratch ? null : space ? (row.linked ? row.top : null) : (row.main ? null : row.path);
-    const controls = h_flex().flex_none().gap(1)
-      .child(button("close", "mods/metro-chrome/icons/close.svg", "Close (keeps the worktree)", space && (() => dialog("metro-dialog", { ask: "close", spaces: [space.id] }))))
-      .child(button("remove", "mods/metro-chrome/icons/trash.svg", "Remove worktree…", folder && (() => dialog("metro-worktree", { folder, ...on, ...(space ? { space: space.id } : {}), action: "remove" }))));
+    const remove = folder && { folder, ...on, ...(space ? { space: space.id } : {}) };
+    const rightClick = (_e, cx) => {
+      cx.stop_propagation();
+      this.menu(space ? { close: space.id, remove } : { open: row.path, ...on, remove });
+    };
     // A worktree whose pull request merged says so, and offers to remove it.
     const done = folder && row.name !== "Main" && row.branch && this.merged[project.path]?.[row.branch];
     const mergedPill = done && h_flex().id(`${id}-merged`).h(20).px(7).gap(4).flex_none().items_center().rounded_full().text_size(11.5)
@@ -325,29 +374,27 @@ export default class Overview extends View {
     if (!space) {
       const branch = row.branch === undefined ? null : row.branch ?? "detached";
       return h_flex().id(id).h(38).flex_none().pl(10).pr(6).gap(8).items_center().rounded(9).border(1).border_color(lit ? t.dim : t.border)
-        .role("button").accessibility_label(`Open ${row.name}`).tooltip("Not open: click to open a space here")
+        .role("button").accessibility_label(`Open ${row.name} with Claude Code`)
         .on_hover(this.hoverBox(id))
         .on_click(() => {
-          run("layout.select", { stack: "view", child: "main" });
-          run("space.new", { folder: row.path, ...on });
+          this.openWithClaude(row.path, project.machine);
         })
-        .child(div().flex_none().max_w(200).truncate().text_size(13.5).font_family(BOLD).font_weight(600).text_color(t.foreground).child(row.name))
+        .on_mouse_down("right", rightClick)
+        .child(div().flex_shrink(1).min_w(0).max_w(200).truncate().text_size(13.5).font_family(BOLD).font_weight(600).text_color(t.foreground).child(row.name))
         .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_family(mono).text_color(t.dim).child(branch ?? ""))
-        .when(Boolean(mergedPill), (el) => el.child(mergedPill))
-        .child(div().flex_none().text_size(12).text_color(t.dim).child(lit ? "Open" : "Not open"))
-        .child(controls);
+        .child(mergedPill || this.claudeHint(lit, t));
     }
     // The worktree reads as a heading over its tabs: its name bold, its branch in the terminal's font.
     return v_flex().id(id).flex_none().rounded(9).bg(t.chrome).border(1).border_color(space.active ? t.dim : "#00000000")
       .on_hover(this.hoverBox(id))
       .child(v_flex().id(`${id}-head`).rounded(8).hover((s) => s.bg(t.hover)).on_click(() => show(space.id, null))
+        .on_mouse_down("right", rightClick)
         .role("button").accessibility_label(`Show ${space.name}`)
         .gap(3).pl(10).pr(6).pt(9).pb(8)
         .child(h_flex().gap(8).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(14).font_family(BOLD).font_weight(600).text_color(t.foreground).child(row.name))
           .when(Boolean(mergedPill), (el) => el.child(mergedPill))
-          .child(h_flex().flex_none().gap(4).text_size(12).children(gitMarks(t, (shared("projects.git") ?? {})[space.id], space.id)))
-          .child(controls))
+          .child(h_flex().flex_none().gap(4).text_size(12).children(gitMarks(t, (shared("projects.git") ?? {})[space.id], space.id))))
         .when(Boolean(row.branch), (el) => el.child(h_flex().gap(6).items_center().text_size(11.5).text_color(t.dim)
           .child(svg("mods/metro-chrome/icons/git-branch.svg").size(12).flex_none())
           .child(div().min_w(0).truncate().font_family(mono).child(row.branch)))))
@@ -355,11 +402,13 @@ export default class Overview extends View {
       .child(v_flex().px(4).py(4).gap(2).children(space.tabs.map((c) => this.tabRow(c, space, ctx, t))));
   }
 
-  // A project's heading: its avatar and bold name, then on hover its buttons. Pressing it picks the card up to move.
+  // A project's heading: its avatar and bold name, then what's at its right (a closed one's hint). In edit mode a grip
+  // takes that place and pressing the heading picks the card up to move.
   heading(p, t, controls) {
     const color = fill(t, p.color), id = `project-${p.key}`;
-    return h_flex().id(`${id}-grip`).w_full().gap(10).items_center().cursor_grab()
-      .on_mouse_down("left", () => { this.drag = { key: p.key, moved: false }; this.dropAt = null; this.dragged = false; })
+    return h_flex().id(`${id}-grip`).w_full().gap(10).items_center()
+      .when(this.editing, (el) => el.cursor_grab()
+        .on_mouse_down("left", () => { this.drag = { key: p.key, moved: false }; this.dropAt = null; this.dragged = false; }))
       // The avatar picks the project's color (Scratch's stays grey).
       .child(h_flex().id(`${id}-color`).size(22).flex_none().rounded(6).bg(color).items_center().justify_center()
         .text_size(12).font_family(BOLD).font_weight(700).text_color(ink(color)).child(p.initial)
@@ -369,21 +418,25 @@ export default class Overview extends View {
             cx.stop_propagation();
             openOverlay({ mod: "metro-space-color", kind: "popup", width: 304, height: 84, props: p.closed ? { key: p.key } : { space: p.space } });
           })))
-      // Double-click the name to rename it; the field takes the name's place and height, so nothing moves.
+      // In edit mode a click on the name renames it (else its menu's Rename does); the field takes the name's place and
+      // height, so nothing moves.
       .when(this.renaming !== p.key, (el) => el.child(div().id(`${id}-title`).flex_1().min_w(0).h(28).flex().items_center()
-        .tooltip("Double-click to rename, drag to move")
-        .on_click((e, cx) => { if (e.click_count === 2) this.startRename(p, cx); })
+        .when(this.editing && !p.scratch, (el) => el.cursor_text()
+          .on_click((_e, cx) => { cx.stop_propagation(); if (!this.dragged) this.startRename(p, cx); }))
         .child(div().min_w(0).truncate().text_size(15).font_family(BOLD).font_weight(700).text_color(t.foreground).child(p.name))))
       .when(this.renaming === p.key, (el) => el.child(div().id(`${id}-name`).flex_1().w_full().min_w(0).h(28).px(6).flex().items_center().rounded(6)
         .bg(t.background).border(1).border_color(t.accent).text_size(15)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.key === "escape") { cx.stop_propagation(); this.finishRename(false, cx); } })
         .child(Input.new(this.nameInput).w_full().h_full())))
-      .child(h_flex().flex_none().gap(4).items_center().children(controls));
+      .child(h_flex().flex_none().gap(4).items_center()
+        .when(!this.editing, (el) => el.children(controls))
+        .when(this.editing, (el) => el.child(div().size(26).flex().items_center().justify_center().text_color(t.dim)
+          .child(svg("mods/metro-chrome/icons/grip-vertical.svg").size(16)))));
   }
 
   // A project's card. Open: its worktrees (Main first, then by name, open or not) and a button for a new one. Closed:
-  // its heading alone; a click opens it again. On hover the heading also adds a worktree (closed), renames, closes.
+  // its heading alone; a click opens it again. On hover the heading also adds a worktree (closed) and closes.
   card(p, ctx, t) {
     const id = `project-${p.key}`, lit = this.hovered === id;
     const on = p.machine ? { machine: p.machine } : {};
@@ -391,18 +444,6 @@ export default class Overview extends View {
     const create = () => p.scratch ? run("metro-tabs.scratch") : p.folder
       ? run("space.new", { folder: p.folder, ...on })
       : dialog("metro-worktree", p.closed ? { folder: p.closed.path, ...on, action: "new" } : { space: p.space, action: "new" });
-    // The controls hold their place while hidden, so showing them moves nothing.
-    const control = (key, icon, name, action) => div().id(`${id}-${key}`).size(26).flex_none().flex().items_center().justify_center().rounded(6)
-      .when(lit, (el) => el.text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .role("button").accessibility_label(name).tooltip(name)
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { cx.stop_propagation(); action(cx); })
-        .child(svg(icon).size(14)));
-    const controls = p.scratch ? [] : [
-      p.closed && control("new", "mods/metro-chrome/icons/plus.svg", label, create),
-      control("rename", "mods/metro-chrome/icons/pencil.svg", "Rename", (cx) => this.startRename(p, cx)),
-      control("close", "mods/metro-chrome/icons/close.svg", p.closed ? "Remove from the list" : "Close this project's spaces (asks first)", () => this.dismiss(p)),
-    ].filter(Boolean);
     // Its actions on a line of their own under the name, lined up with it.
     const buttons = this.actionButtons(p, t);
     const acts = h_flex().pl(32).gap(6).flex_wrap().children(buttons);
@@ -410,18 +451,18 @@ export default class Overview extends View {
       .on_hover(this.hover(id))
       .when(this.drag?.moved && this.drag.key === p.key, (el) => el.opacity(0.35));
     if (p.closed) {
-      return base.px(12).py(9).gap(8).role("button").accessibility_label(`Open ${p.name}`)
+      return base.px(12).py(9).gap(8).role("button").accessibility_label(`Open ${p.name} with Claude Code`)
         .on_click(() => {
-          if (this.dragged) return;
-          run("layout.select", { stack: "view", child: "main" });
-          run("space.new", { folder: p.closed.path, ...on });
+          if (this.dragged || this.editing) return;
+          this.openWithClaude(p.closed.path, p.machine);
         })
-        .child(this.heading(p, t, [div().flex_none().text_size(12).text_color(t.dim).child(lit ? "Open" : "Not open"), ...controls]))
+        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.projectMenu(p, t); })
+        .child(this.heading(p, t, [this.claudeHint(lit && !this.editing, t)]))
         .when(buttons.length > 0, (el) => el.child(acts));
     }
     const rows = [...p.rows].sort((a, b) => (b.name === "Main") - (a.name === "Main") || a.name.localeCompare(b.name));
     return base.p(12).gap(10)
-      .child(this.heading(p, t, controls))
+      .child(this.heading(p, t, []).when(!p.scratch, (el) => el.on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.projectMenu(p, t); })))
       .when(buttons.length > 0, (el) => el.child(acts))
       .children(rows.map((r) => this.worktree(r, p, ctx, t)))
       .child(div().id(`${id}-new`).h(36).flex_none().flex().items_center().justify_center().gap(8).rounded(9)
@@ -562,6 +603,11 @@ export default class Overview extends View {
     const recent = this.recentRow(tree, ctx, t, cols, Math.max(0, colW));
     const ghost = dragging && this.pointer && byKey.get(this.drag.key);
     return div().id("overview").relative().size_full().min_h(0).bg(t.chrome)
+      .track_focus(this.editKeys)
+      .on_key_down((e, cx) => {
+        if (e.key !== "escape" || !this.editing || this.renaming) return;
+        cx.stop_propagation(); this.editing = false; cx.notify();
+      })
       .when(dragging, (el) => el.cursor_grabbing())
       .on_size_change((size, cx) => { if (size.width !== this.width) { this.width = size.width; cx.notify(); } })
       .on_mouse_move((e, cx) => {
@@ -587,7 +633,15 @@ export default class Overview extends View {
               .hover((s) => s.bg(t.hover).text_color(t.foreground))
               .role("button").accessibility_label("Add project").tooltip("Add project…")
               .on_click((_e, cx) => cx.spawn(async () => this.addProject()))
-              .child(svg("mods/metro-chrome/icons/plus.svg").size(14))))
+              .child(svg("mods/metro-chrome/icons/plus.svg").size(14)))
+            // Edit arranges the cards and renames projects; Done or Esc ends it.
+            .child(div().flex_1())
+            .child(div().id("projects-edit").h(26).px(10).flex().items_center().rounded(7).text_size(12.5)
+              .when(!this.editing, (el) => el.text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).child("Edit"))
+              .when(this.editing, (el) => el.bg(t.solid).text_color(t.solid_foreground).child("Done"))
+              .role("button").accessibility_label(this.editing ? "Done arranging" : "Arrange and rename projects")
+              .tooltip(this.editing ? "Done (esc)" : "Drag cards to arrange them, click a name to rename it")
+              .on_click((_e, cx) => { this.editing = !this.editing; if (this.editing) this.editKeys.focus(); cx.notify(); })))
           .when(Boolean(this.actionsError), (el) => el.child(div().text_size(12).text_color(t.blocked)
             .child(`Couldn't read metro-actions.json (${this.actionsError}). Fix the file and the actions come back.`)))
           .child(h_flex().id("columns").w_full().flex_1().items_stretch().gap(GAP)
