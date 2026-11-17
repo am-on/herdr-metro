@@ -31,6 +31,7 @@ const headingMark = (t, kind) => {
   if (kind === "done") return box(div().size(8).rounded_full().bg(t.done));
   if (kind === "idle") return box(div().size(8).rounded_full().border(1.5).border_color(t.dim));
   if (kind === "check") return box(svg("mods/metro-chrome/icons/bookmark-filled.svg").size(11).text_color(t.accent));
+  if (kind === "pinned") return box(svg("mods/metro-chrome/icons/pin.svg").size(12).text_color(MARK.ansi1));
   if (kind === "review") return box(svg("mods/metro-chrome/icons/git-compare.svg").size(12).text_color(t.muted));
   if (kind === "terminal") return box(svg("mods/metro-chrome/icons/terminal.svg").size(12).text_color(t.muted));
   return null;
@@ -554,7 +555,7 @@ export default class Agents extends View {
     };
 
     // Priority sections in list order, pinned agents first in their own; then reviews and terminals.
-    const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
+    const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: "pinned", members: pinned }] : [];
     for (const a of rest) {
       const r = sectionOf(a);
       const id = `sec-${r}`;
@@ -578,8 +579,8 @@ export default class Agents extends View {
         .items_center()
         .text_size(11)
         // Working is green, as its spinner; Idle's theme color is a faint grey meant for marks, so its header is a dark grey.
-        .child(headingMark(t, g.status))
-        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_size(14).text_color({ check: t.accent, working: t.ansi2, idle: t.foreground + "bb", review: t.foreground + "bb", terminal: t.foreground + "bb" }[g.status] ?? t[g.status] ?? t.dim).child(g.label))
+        .children([headingMark(t, g.status)].filter(Boolean))
+        .child(div().min_w(0).truncate().font_family(BOLD).font_weight(700).text_size(14).text_color({ check: t.accent, working: t.ansi2, pinned: MARK.ansi1, idle: t.foreground + "bb", review: t.foreground + "bb", terminal: t.foreground + "bb" }[g.status] ?? t[g.status] ?? t.dim).child(g.label))
         // A count only where the rows don't show it at a glance: past five. Ringed, as Spaces' hidden worktrees.
         .when(g.members.length > 5, (el) => el.child(div().size(22).flex_none().rounded_full().border(1).border_color(t.border)
           .flex().items_center().justify_center().text_size(11).text_color(t.muted).child(String(g.members.length))));
@@ -662,7 +663,7 @@ export default class Agents extends View {
     // Each section sits on a light card, a third of the way from white to the sidebar's grey, tinted 4% with its color (7%
     // for Working, the one to watch), mixed solid: rows are opaque boxes so a sliding one hides what it passes, and they
     // take the card's color.
-    const SEC_COLOR = { blocked: t.blocked, working: t.ansi2, check: t.accent, done: t.done, idle: t.foreground, terminal: t.foreground, review: t.ansi5 };
+    const SEC_COLOR = { blocked: t.blocked, working: t.ansi2, pinned: MARK.ansi1, check: t.accent, done: t.done, idle: t.foreground, terminal: t.foreground, review: t.ansi5 };
     const mix = (a, b, f) => { const p = (h, i) => parseInt(h.slice(1 + 2 * i, 3 + 2 * i), 16); return "#" + [0, 1, 2].map((i) => Math.round(p(a, i) * (1 - f) + p(b, i) * f).toString(16).padStart(2, "0")).join(""); };
     const secBg = (s) => mix(mix(t.background, t.chrome, 0.33), SEC_COLOR[s] ?? t.foreground, s === "working" ? 0.07 : 0.04);
     const secEdge = (s) => mix(t.chrome, SEC_COLOR[s] ?? t.foreground, s === "working" ? 0.2 : 0.12);
