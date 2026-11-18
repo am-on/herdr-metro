@@ -35,6 +35,9 @@ export default class Projects extends View {
     this.ready = {}; // machine -> its layout was readable at the last look
     this.at = {}; // space -> its where() at the last look
     this.watching = new Set(); // local repos' git folders
+    this.treeAt = {}; // kept repo with no space open -> when its checkouts were last read
+    this.staleTrees = new Set(); // kept repos whose git folder changed since
+    this.readingTrees = new Set();
     // Spaces made while this runs wait (at most a moment) for their git, so a
     // worktree appears under its repo instead of jumping there.
     this.shown = new Set(spaces().map((s) => s.id));
@@ -52,6 +55,7 @@ export default class Projects extends View {
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
+    this.keptTrees(now, sp, cx);
     this.noteUse(sp);
     // A space waiting for its git joins its project as soon as it's known or has waited long enough.
     if (now - (this.workedAt ?? 0) > 1000 || sp.some((s) => !this.shown.has(s.id))) { this.workedAt = now; this.work(); }
@@ -113,6 +117,36 @@ export default class Projects extends View {
     return due;
   }
 
+  // A kept repo with no space open still lists its checkouts: read when its git folder changes, else on the fallback.
+  keptTrees(now, sp, cx) {
+    const ps = panes(), open = new Set(sp.map((s) => this.git[where(s, ps)]?.repo).filter(Boolean));
+    for (const k of this.kept) {
+      if (k.folder || !k.path || open.has(k.key) || this.readingTrees.has(k.key)) continue;
+      const due = !(k.key in this.treeAt) || this.staleTrees.has(k.key) || (window().active && now - this.treeAt[k.key] > FALLBACK);
+      if (!due) continue;
+      this.readingTrees.add(k.key);
+      this.staleTrees.delete(k.key);
+      this.treeAt[k.key] = now;
+      cx.spawn(async (cx) => {
+        try {
+          await this.readTrees(k.key, k.path, k.machine ?? null);
+          if (!k.machine) this.watch(JSON.parse(k.key)[1], cx);
+        } catch {}
+        this.readingTrees.delete(k.key);
+        this.work();
+      });
+    }
+  }
+
+  // A repo's checkouts (`git worktree list`), the main one first; ones git has lost the folder of are left out.
+  async readTrees(repo, cwd, on) {
+    const list = await exec("git", ["worktree", "list", "--porcelain"], { cwd, on });
+    if (list.code !== 0) return;
+    this.trees[repo] = list.stdout.trim().split(/\n\n+/).map((block) => block.split("\n"))
+      .filter((lines) => !lines.some((l) => l === "bare" || l.startsWith("prunable")))
+      .map((lines, n) => ({ path: lines[0].slice(9), branch: lines.find((l) => l.startsWith("branch "))?.slice(18) ?? null, main: n === 0 }));
+  }
+
   // `key` and the other places in its repo (a commit there moves their ahead/behind).
   sameRepo(key, keys) {
     const repo = this.git[key]?.repo;
@@ -131,6 +165,7 @@ export default class Projects extends View {
         for (const key of keys) await this.check(key, cx);
       }
       const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
+      for (const k of this.kept) if (!k.folder && !k.machine) used.add(JSON.parse(k.key)[1]);
       for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
       this.publish();
       this.refreshing = false;
@@ -160,10 +195,7 @@ export default class Projects extends View {
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
       const info = { name, branch: null, ahead: 0, behind: 0, add: 0, del: 0, repo: JSON.stringify([on, repo]), top: top.stdout.trim(), linked: repo !== `${top.stdout.trim()}/.git` };
       // Every checkout of the repo, so the ones no space shows are listed under it too.
-      const list = await exec("git", ["worktree", "list", "--porcelain"], { cwd, on });
-      if (list.code === 0) this.trees[info.repo] = list.stdout.trim().split(/\n\n+/).map((block) => block.split("\n"))
-        .filter((lines) => !lines.some((l) => l === "bare" || l.startsWith("prunable")))
-        .map((lines, n) => ({ path: lines[0].slice(9), branch: lines.find((l) => l.startsWith("branch "))?.slice(18) ?? null, main: n === 0 }));
+      await this.readTrees(info.repo, cwd, on);
       for (const line of r.stdout.split("\n")) {
         if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
         else if (line.startsWith("# branch.ab ")) {
@@ -246,7 +278,9 @@ export default class Projects extends View {
         while (this.watching.has(repo)) {
           await watchFolder(repo);
           const mine = JSON.stringify([null, repo]);
-          if (this.watching.has(repo)) this.refreshGit(Object.keys(this.git).filter((k) => this.git[k]?.repo === mine), cx);
+          if (!this.watching.has(repo)) break;
+          this.staleTrees.add(mine);
+          this.refreshGit(Object.keys(this.git).filter((k) => this.git[k]?.repo === mine), cx);
         }
       } catch { this.watching.delete(repo); }
     });
@@ -337,8 +371,15 @@ export default class Projects extends View {
       kept.push(...fresh.map((r) => this.keeping(r)));
       setShared("projects.kept", kept);
     }
-    // Kept projects with nothing open stay after the open ones, in the same colors.
-    for (const k of kept) if (!placed.has(k.key)) out.push({ kind: "project", w: { id: null, machine: k.machine }, g: { repo: k.key, name: k.name, initial: k.initial, folder: k.folder ? k.path : null }, closed: k, count: 0 });
+    // Kept projects with nothing open stay after the open ones, in the same colors, a repo with its checkouts.
+    for (const k of kept) {
+      if (placed.has(k.key)) continue;
+      const w = { id: null, machine: k.machine }, checkouts = k.folder ? [] : this.trees[k.key] ?? [];
+      out.push({ kind: "project", w, g: { repo: k.key, name: k.name, initial: k.initial, folder: k.folder ? k.path : null }, closed: k, count: 0 });
+      const kids = checkouts.map((c) => ({ kind: "checkout", w, c, primary: c.main }));
+      tree[k.key] = kids;
+      out.push(...kids);
+    }
     // Open projects, then closed ones, each the most recently shown first. Ones never shown since follow in the order
     // they were once dragged into (`projects.order`), then as they come.
     const groups = [];

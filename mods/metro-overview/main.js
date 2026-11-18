@@ -435,8 +435,8 @@ export default class Overview extends View {
           .child(svg("mods/metro-chrome/icons/grip-vertical.svg").size(16)))));
   }
 
-  // A project's card. Open: its worktrees (Main first, then by name, open or not) and a button for a new one. Closed:
-  // its heading alone; a click opens it again. On hover the heading also adds a worktree (closed) and closes.
+  // A project's card: its worktrees (Main first, then by name, open or not) and a button for a new one, whether or not
+  // any is open. A closed one with no worktree but Main (or a plain folder) is its heading alone; a click opens Claude Code there.
   card(p, ctx, t) {
     const id = `project-${p.key}`, lit = this.hovered === id;
     const on = p.machine ? { machine: p.machine } : {};
@@ -447,10 +447,11 @@ export default class Overview extends View {
     // Its actions on a line of their own under the name, lined up with it.
     const buttons = this.actionButtons(p, t);
     const acts = h_flex().pl(32).gap(6).flex_wrap().children(buttons);
-    const base = v_flex().id(id).w_full().flex_none().rounded(12).bg(t.background).border(1).border_color(lit && p.closed ? t.dim : t.border)
+    const line = p.closed && p.rows.length < 2;
+    const base = v_flex().id(id).w_full().flex_none().rounded(12).bg(t.background).border(1).border_color(lit && line ? t.dim : t.border)
       .on_hover(this.hover(id))
       .when(this.drag?.moved && this.drag.key === p.key, (el) => el.opacity(0.35));
-    if (p.closed) {
+    if (line) {
       return base.px(12).py(9).gap(8).role("button").accessibility_label(`Open ${p.name} with Claude Code`)
         .on_click(() => {
           if (this.dragged || this.editing) return;
