@@ -36,8 +36,6 @@ const headingMark = (t, kind) => {
   if (kind === "terminal") return box(svg("mods/metro-chrome/icons/terminal.svg").size(12).text_color(t.muted));
   return null;
 };
-// What a review compares, as its switch names it.
-const REVIEW_MODE = { uncommitted: "Uncommitted", last: "Last commit", branch: "Branch" };
 // Sections that show their first five, with a row under them for the rest.
 const SHORT = new Set(["sec-1", "sec-terminal"]);
 // How long a box takes to slide to its new place, and to fade in or out.
@@ -510,15 +508,14 @@ export default class Agents extends View {
     };
     const homeDir = home();
     const tilde = (dir) => (dir && homeDir && (dir === homeDir || dir.startsWith(homeDir + "/")) ? "~" + dir.slice(homeDir.length) : dir);
-    // Two lines, as an agent's: the tab's given name, else Review or the terminal's program or title; then what a review compares and its size, or a terminal's branch or folder.
+    // Two lines, as an agent's: the tab's given name, else Review or the terminal's program or title; then the branch, else the folder.
     const otherRow = (x) => {
       const { p } = x, review = x.kind === "review", hovered = this.hovered === x.address;
       const tab = tabOf.get(p.tab), sum = review ? shared(`metro-review.${p.tab}`) : null;
       const name = tab?.named ? tab.name : review ? "Review" : label(p);
       const pic = review ? svg("mods/metro-chrome/icons/git-compare.svg").size(14).flex_none().text_color(t.foreground)
         : icon(p.program, 14, t.foreground) ?? svg("mods/metro-chrome/icons/terminal.svg").size(14).flex_none().text_color(t.foreground);
-      const files = sum?.files != null ? ` · ${sum.files} file${sum.files === 1 ? "" : "s"}` : "";
-      const detail = review ? `${REVIEW_MODE[sum?.mode] ?? "Changes"}${files}` : p.branch || tilde(p.cwd) || "";
+      const detail = (review ? sum?.branch ?? spaceOf.get(p.tab)?.branch : p.branch) || tilde(p.cwd) || "";
       const git = review ? (sum ? { add: sum.add, del: sum.del } : null)
         : p.branch && gitOf[x.space]?.branch === p.branch ? gitOf[x.space] : null;
       const close = Button.new(`close-${x.address}`)

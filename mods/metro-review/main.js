@@ -333,7 +333,7 @@ export default class Review extends View {
     const tab = this.tab ??= this.claimTab();
     if (!tab) return null;
     const add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
-    this.publish(tab, { mode: this.mode, base: this.baseName ?? null, last: this.lastCommit ?? null, listWidth: this.listWidth,
+    this.publish(tab, { mode: this.mode, base: this.baseName ?? null, last: this.lastCommit ?? null, branch: this.branchName ?? null, listWidth: this.listWidth,
       files: this.files.length, add, del, loading: Boolean(this.loading) });
     return tab;
   }
@@ -407,6 +407,8 @@ export default class Review extends View {
         }
         const head = await git(["log", "-1", "--format=%h %s"]);
         this.lastCommit = head.code === 0 ? head.stdout.trim() : null;
+        const current = await git(["branch", "--show-current"]);
+        this.branchName = current.code === 0 ? current.stdout.trim() || null : null;
         const names = await git(["diff", ref, "--name-status", "-z", "--no-renames"]);
         const stats = await git(["diff", ref, "--numstat", "-z", "--no-renames"]);
         const untracked = await git(["ls-files", "--others", "--exclude-standard", "-z"]);
