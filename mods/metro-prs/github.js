@@ -178,12 +178,12 @@ const git = async (cwd, args) => {
 export async function checkouts(folders) {
   const out = {};
   for (const folder of folders) {
-    const common = await git(folder, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    if (!common.ok) continue;
+    const common = await git(folder, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => null);
+    if (!common?.ok) continue;
     const main = common.out.replace(/\/\.git$/, "");
     if (Object.values(out).includes(main)) continue;
-    const url = await git(main, ["remote", "get-url", "origin"]);
-    const repo = url.ok ? repoOf(url.out) : null;
+    const url = await git(main, ["remote", "get-url", "origin"]).catch(() => null);
+    const repo = url?.ok ? repoOf(url.out) : null;
     if (repo) out[repo.toLowerCase()] = main;
   }
   return out;

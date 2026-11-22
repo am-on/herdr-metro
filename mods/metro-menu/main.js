@@ -123,14 +123,18 @@ function shortcut(name, args) {
 
 // A space opens in the folder with the agent as its first tab, started as the + menu starts it (programs.json's `run`),
 // or a shell; the work area goes back from the overview to the tabs.
-function openThere(tg, agent) {
+function openThere(tg, agent, overlay, cx) {
   const on = tg.machine ? { machine: tg.machine } : {};
   const start = (argv) => {
+    closeOverlay(overlay);
     run("layout.select", { stack: "view", child: "main" });
     run("space.new", { folder: tg.open, ...(argv ? { argv } : {}), ...on });
   };
   if (!agent) return start(null);
-  knownAgents({ on: tg.machine }).then((list) => start(list.find((k) => k.key === agent)?.run ?? [agent]), () => start([agent]));
+  cx.spawn(async () => {
+    const list = await knownAgents({ on: tg.machine }).catch(() => []);
+    start(list.find((k) => k.key === agent)?.run ?? [agent]);
+  });
 }
 
 export default class Menu extends View {
@@ -152,6 +156,11 @@ export default class Menu extends View {
   choose(i, cx) {
     const it = items(props(), this.git)[i];
     if (!it) return;
+    if (it[1] === "open") {
+      if (this.opening) return;
+      this.opening = true;
+      return openThere(props().target, it[2].agent, props().overlay, cx);
+    }
     closeOverlay(props()?.overlay);
     if (it[1] === "worktree") dialog("metro-worktree", it[2]);
     else if (it[1] === "tab.rename") dialog("metro-dialog", { ask: "rename", tab: it[2].id });
@@ -159,7 +168,6 @@ export default class Menu extends View {
     else if (it[1] === "space.close") dialog("metro-dialog", { ask: "close", spaces: [it[2].id] });
     else if (it[1] === "tab.close") closeTab(it[2].id);
     else if (it[1] === "pane.close") closePane(it[2].pane);
-    else if (it[1] === "open") openThere(props().target, it[2].agent);
     else if (it[1] === "project.rename" || it[1] === "project.dismiss") {
       setShared("metro-overview.menu", { key: props().target.project.key });
       run(`metro-overview.${it[1] === "project.rename" ? "rename" : "dismiss"}`);
