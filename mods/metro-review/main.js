@@ -11,6 +11,16 @@ const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.a
 const MAX_LINES = 2000;
 // A line longer than this is drawn as plain text: a box per word, as colored lines take, would be too many to draw in time.
 const LONG_LINE = 1000;
+// The boxes a diff draws at once: a render past about 7,000 is cut off, so a longer diff shows a page of this many at a time.
+const PAGE = 3000;
+// A posted comment's card, in boxes.
+const COMMENT_COST = 30;
+// A diff line's boxes: its row, gutter, numbers and sign, then a box per word and per colored piece.
+function rowCost(row) {
+  if (!row.side) return 4;
+  if (row.text.length > LONG_LINE) return 8;
+  return row.cost ??= 8 + (row.text.match(/\S+/g)?.length ?? 0) + (row.tokens?.length ?? 0);
+}
 const ROW = 20;
 const MODES = [{ id: "uncommitted", label: "Uncommitted" }, { id: "last", label: "Last commit" }, { id: "branch", label: "Branch" }];
 // Agents Send can start, in a new tab with the comments as their first message; programs.json's `run` wins once known.
@@ -476,7 +486,7 @@ export default class Review extends View {
 
   pick(path, cx) {
     if (this.open === path) return;
-    this.open = path; this.rows = []; this.editing = null;
+    this.open = path; this.rows = []; this.editing = null; this.page = null;
     cx.spawn(async (cx) => {
       try { await this.loadDiff(path); } catch (e) { this.rows = diffRows([`Couldn't show this diff: ${e}`]); }
       cx.notify();
@@ -609,6 +619,7 @@ export default class Review extends View {
     const rows = this.needle() ? this.corpus?.get(path) : null;
     const i = rows ? rows.findIndex((r) => r.side && r.text.toLowerCase().includes(this.needle())) : -1;
     this.jump = i >= 0 ? { path, i, text: rows[i].text } : null;
+    this.page = null;
     this.jumps = (this.jumps ?? 0) + 1;
   }
 
@@ -620,6 +631,7 @@ export default class Review extends View {
     if (k >= 0) this.current = k;
     const it = r.items[at], hit = it.type === "row" ? it : r.items[r.matches[k]?.at];
     this.jump = hit?.row ? { path: it.path, i: hit.i, text: hit.row.text } : null;
+    this.page = null;
     this.jumps = (this.jumps ?? 0) + 1;
     this.showResults = false;
     if (this.open === r.items[at].path) cx.notify();
@@ -787,23 +799,37 @@ export default class Review extends View {
     for (const c of this.mine().filter((c) => c.path === this.open)) if (c.id !== e?.id) place(this.at(c.to), { type: "comment", c });
     if (e) place(this.at(e.to), { type: "editor" });
     const editorAt = e ? this.at(e.to) : -1, shown = this.shownRows(editorAt);
-    // Opened from the search, the file starts two lines above its match; what's above folds into one row that opens it.
+    const rows = this.rows, visible = (i) => !shown || shown.has(i);
+    // Opened from the search, the file starts two lines above its match.
     let start = 0;
     const j = this.jump;
     if (shown && j?.path === this.open) {
-      const at = this.rows[j.i]?.side && this.rows[j.i].text === j.text ? j.i : this.rows.findIndex((r) => r.side && r.text === j.text);
-      if (at >= 0) { start = at; for (let k = 0; k < CONTEXT && start > 0 && this.rows[start - 1].side; k++) start--; }
-      if (editorAt >= 0 && editorAt < start) start = 0;
+      const at = rows[j.i]?.side && rows[j.i].text === j.text ? j.i : rows.findIndex((r) => r.side && r.text === j.text);
+      if (at >= 0) { start = at; for (let k = 0; k < CONTEXT && start > 0 && rows[start - 1].side; k++) start--; }
     }
+    if (this.page?.path === this.open) start = Math.min(this.page.i, rows.length);
+    // A long diff shows a page at a time; the lines before and after it fold into a row each, and the page holds the comment being written.
+    const cost = (i) => rowCost(rows[i]) + (under.get(i)?.length ?? 0) * COMMENT_COST;
+    const pageEnd = (from) => {
+      let spent = 0, i = from;
+      for (; i < rows.length; i++) if (visible(i)) { if (spent && spent + cost(i) > PAGE) break; spent += cost(i); }
+      return i;
+    };
+    const pageStart = (to, budget) => {
+      let spent = 0, from = to;
+      for (let i = to - 1; i >= 0; i--) if (visible(i)) { if (spent && spent + cost(i) > budget) break; spent += cost(i); from = i; }
+      return from;
+    };
+    let end = pageEnd(start);
+    if (editorAt >= 0 && (editorAt < start || editorAt >= end)) { start = pageStart(editorAt + 1, PAGE / 2); end = pageEnd(start); }
+    const lines = (from, to) => { let n = 0; for (let i = from; i < to; i++) if (visible(i) && rows[i].side) n++; return n; };
     const out = [];
-    let above = 0;
-    this.rows.forEach((row, i) => {
-      if (shown && !shown.has(i)) return;
-      if (i < start) { if (row.side) above++; return; }
-      out.push({ type: "row", row, i }); out.push(...(under.get(i) ?? []));
-    });
+    for (let i = start; i < end; i++) if (visible(i)) { out.push({ type: "row", row: rows[i], i }); out.push(...(under.get(i) ?? [])); }
+    const before = pageStart(start, PAGE), after = pageEnd(end);
+    const above = { type: "fold", up: true, i: before, n: lines(before, start), left: lines(0, start) };
+    const below = { type: "fold", up: false, i: end, n: lines(end, after), left: lines(end, rows.length) };
     // Comments whose lines are gone from the diff now (the code changed) stay visible at the top.
-    return [...lost, ...(above ? [{ type: "above", n: above }] : []), ...out];
+    return [...lost, ...(above.left ? [above] : []), ...out, ...(below.left ? [below] : [])];
   }
 
   // While searching, the rows of the hunks with a match, and of the hunk the comment being written is in; null shows every row.
@@ -821,14 +847,17 @@ export default class Review extends View {
     return shown;
   }
 
-  // The lines above where the search opened the file, folded; a click shows them.
-  aboveRow(n, t) {
-    return h_flex().id("lines-above").w_full().h(28).pl(NUM * 2 + 12).gap(8).items_center().bg(t.chrome).border_b(1).border_color(t.border)
+  // The lines before or after the page on screen, folded; a click shows the page next to it, from its top.
+  foldRow(it, t) {
+    const of = it.left > it.n ? ` of ${it.left.toLocaleString()}` : "";
+    const what = it.up ? `Show ${it.n.toLocaleString()}${of} line${it.left === 1 ? "" : "s"} above` : `Show ${it.n.toLocaleString()}${of} more line${it.left === 1 ? "" : "s"}`;
+    return h_flex().id(it.up ? "lines-above" : "lines-below").w_full().h(28).pl(NUM * 2 + 12).gap(8).items_center().bg(t.chrome)
+      .when(it.up, (e) => e.border_b(1)).when(!it.up, (e) => e.border_t(1)).border_color(t.border)
       .cursor_pointer().text_color(t.muted).font_family(settings().ui_font ?? "Geist").text_size(12)
       .hover((s) => s.text_color(t.foreground))
-      .on_click((_e, cx) => { this.jump = null; cx.notify(); })
-      .child(svg("mods/metro-chrome/icons/chevron-up.svg").size(13))
-      .child(`Show ${n} line${n === 1 ? "" : "s"} above`);
+      .on_click((_e, cx) => { this.jump = null; this.page = { path: this.open, i: it.i }; this.jumps = (this.jumps ?? 0) + 1; cx.notify(); })
+      .child(svg(`mods/metro-chrome/icons/chevron-${it.up ? "up" : "down"}.svg`).size(13))
+      .child(what);
   }
 
   // Laid out as GitHub's unified diff: old and new numbers in a tinted gutter, the sign, then the code.
@@ -1085,8 +1114,8 @@ export default class Review extends View {
     // A new id for each file and each search jump: the column starts at its top, not where the last one was scrolled.
     const diffList = scrolled(`review-diff-${this.open}-${this.jumps ?? 0}`, v_flex().w_full().flex_none().pr(10).pb(24)
       .font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
-      .children((openFile ? items : []).map((it) => (it.type === "row" ? this.diffRow(it.row, it.i, t, sel) : it.type === "above" ? this.aboveRow(it.n, t) : it.type === "editor" ? this.editorRow(t, it.lost) : this.commentRow(it, t))))
-      .when(Boolean(this.truncated), (e) => e.child(div().px(16).py(8).text_size(11).text_color(t.dim)
+      .children((openFile ? items : []).map((it) => (it.type === "row" ? this.diffRow(it.row, it.i, t, sel) : it.type === "fold" ? this.foldRow(it, t) : it.type === "editor" ? this.editorRow(t, it.lost) : this.commentRow(it, t))))
+      .when(Boolean(this.truncated) && !items.some((it) => it.type === "fold" && !it.up), (e) => e.child(div().px(16).py(8).text_size(11).text_color(t.dim)
         .child(`Showing the first ${MAX_LINES.toLocaleString()} lines of this file.`))));
     // While searching, every match in one list, until a result or a file is opened.
     const hit = results?.matches[Math.min(this.current, results.matches.length - 1)];
