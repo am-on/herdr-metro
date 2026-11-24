@@ -656,7 +656,8 @@ export default class Agents extends View {
       it.top = first.top - 2;
       it.h = last.top + heightOf(last) - first.top - 2;
     }
-    const height = y;
+    // Include the last card's 10px lower edge plus 24px of scrollable space below it.
+    const height = items.length ? y + 10 + 24 : y;
     // Each section sits on a light card, a third of the way from white to the sidebar's grey, tinted 4% with its color (7%
     // for Working, the one to watch), mixed solid: rows are opaque boxes so a sliding one hides what it passes, and they
     // take the card's color.

@@ -3,7 +3,8 @@
 // shared state. It sits in a block of no size in the status bar, so it runs whether or not the sidebar's list shows.
 
 import { View, div } from "gpui-kit";
-import { spaces, panes, machines, exec, home, shared, setShared, watchFolder, window } from "herdr";
+import { agents, spaces, panes, machines, exec, appHome, home, shared, setShared, watchFolder, window } from "herdr";
+import { namer } from "./name.js";
 import { untrackedLines } from "./untracked.js";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
@@ -47,6 +48,38 @@ export default class Projects extends View {
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
+    this.agentStates = new Map(agents().map((a) => [a.address, a.status]));
+    cx.timer.every(1000, (cx) => this.notifyAgents(cx));
+  }
+
+  notifyAgents(cx) {
+    const win = window();
+    if (win?.platform !== "macos") return;
+    const previous = this.agentStates;
+    const list = agents();
+    this.agentStates = new Map(list.map((a) => [a.address, a.status]));
+    for (const agent of list) {
+      const before = previous.get(agent.address);
+      if (before === agent.status) continue;
+      const blocked = agent.status === "blocked";
+      const finished = agent.status === "done" ||
+        (before === "working" && agent.status === "idle" && !win.active);
+      if (!blocked && !finished) continue;
+      const tab = spaces().find((s) => s.id === agent.space)?.tabs.find((t) => t.id === agent.tab);
+      const lead = panes().find((p) => p.tab === agent.tab && p.status != null);
+      const title = tab?.named ? tab.name : namer()(lead ?? agent);
+      const icon = [agent.app, agent.program.key].map((id) => id === "claude-code" ? "claude" : id)
+        .find((id) => id === "claude" || id === "codex");
+      cx.spawn(async () => {
+        const result = await exec("/opt/homebrew/bin/terminal-notifier", [
+          "-title", agent.space_name + (blocked ? " - 🟠 Question - Herdr" : " - 🟢 Finished - Herdr"),
+          "-message", title,
+          ...(icon ? ["-contentImage", appHome() + "/mods/metro-projects/" + icon + ".png"] : []),
+          "-group", "herdr-agent-" + agent.address, "-activate", "dev.herdr.app",
+        ]);
+        if (result.code !== 0) console.warn("Agent notification failed", result.stderr);
+      });
+    }
   }
 
   checkNew(cx) {

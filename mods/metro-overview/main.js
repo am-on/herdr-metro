@@ -106,7 +106,7 @@ export default class Overview extends View {
     this.actions = {};
     this.actionsError = null;
     this.loadActions(cx);
-    cx.timer.every(3000, (cx) => { if (onScreen()) { this.loadActions(cx); this.loadMerged(cx); } });
+    cx.timer.every(3000, (cx) => { if (onScreen()) { this.loadActions(cx); cx.spawn(async (cx) => this.loadMerged(cx)); } });
     this.merged = {}; // project path -> branch -> { number, url } of its latest pull request, when that one merged
     this.mergedAt = 0;
     this.renaming = null; // the project key whose name is being edited
@@ -118,6 +118,7 @@ export default class Overview extends View {
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
+        if (c === "cleanup") { this.previewCleanup(cx); continue; }
         const key = shared("metro-overview.menu")?.key, p = key && (shared("projects.tree") ?? []).find((x) => x.key === key);
         if (!p) continue;
         if (c === "rename") this.startRename(p, cx);
@@ -128,10 +129,10 @@ export default class Overview extends View {
 
   // Which worktrees' branches are done: their latest pull request merged. One GitHub query asks only about the
   // branches checked out here, a fork's `pr/<n>` being pull request n. Only projects on this computer, where `gh` is.
-  loadMerged(cx) {
-    if (this.mergedLoading || Date.now() - this.mergedAt < MERGED_EVERY) return;
-    this.mergedLoading = true;
-    cx.spawn(async (cx) => {
+  async loadMerged(cx, refresh = false) {
+    if (this.mergedLoading) return this.mergedLoading.catch(() => {});
+    if (!refresh && Date.now() - this.mergedAt < MERGED_EVERY) return;
+    this.mergedLoading = (async () => {
       const tree = (shared("projects.tree") ?? []).filter((p) => !p.machine && !p.scratch && !p.folder && p.path && p.rows.some((r) => r.name !== "Main" && r.branch));
       this.origins ??= {};
       const asks = [];
@@ -146,7 +147,7 @@ export default class Overview extends View {
       }
       const next = {};
       if (asks.length) {
-        const fields = "number url state";
+        const fields = "number url state headRefOid";
         const query = `query { ${asks.map((a, i) => `p${i}: repository(owner: ${JSON.stringify(a.repo[0])}, name: ${JSON.stringify(a.repo[1])}) { ${a.branches.map((b, j) => {
           const fork = /^pr\/(\d+)$/.exec(b);
           return fork ? `b${j}: pullRequest(number: ${fork[1]}) { ${fields} }`
@@ -155,20 +156,44 @@ export default class Overview extends View {
         const r = await exec("gh", ["api", "graphql", "-f", `query=${query}`]).catch(() => null);
         let data = null;
         try { data = r?.code === 0 ? JSON.parse(r.stdout).data : null; } catch {}
-        if (!data) { this.mergedLoading = false; this.mergedAt = Date.now(); return; }
+        if (!data) throw new Error("GitHub merge lookup failed");
         asks.forEach((a, i) => {
           next[a.path] = {};
           a.branches.forEach((b, j) => {
             const got = data[`p${i}`]?.[`b${j}`], pr = got?.nodes ? got.nodes[0] : got;
-            if (pr?.state === "MERGED") next[a.path][b] = { number: pr.number, url: pr.url };
+            if (pr?.state === "MERGED") next[a.path][b] = { number: pr.number, url: pr.url, head: pr.headRefOid };
           });
         });
       }
+      this.mergeError = false;
       this.merged = next;
-      this.mergedAt = Date.now();
-      this.mergedLoading = false;
-      cx.notify();
-    });
+    })();
+    try { await this.mergedLoading; }
+    catch { this.mergeError = true; }
+    finally { this.mergedAt = Date.now(); this.mergedLoading = null; cx.notify(); }
+  }
+
+  cleanupCandidates(tree) {
+    const items = new Map();
+    for (const p of tree) {
+      if (p.machine || p.scratch || p.folder) continue;
+      for (const row of p.rows) {
+        const folder = row.space ? row.linked && row.top : !row.main && row.path;
+        const pr = this.merged[p.path]?.[row.branch];
+        if (!folder || !pr) continue;
+        if (items.has(folder)) {
+          if (row.space) items.get(folder).spaces.push(row.space);
+          continue;
+        }
+        items.set(folder, { folder, main: p.path, branch: row.branch, head: pr.head,
+          label: p.name + " · " + row.branch + " (#" + pr.number + ")", spaces: row.space ? [row.space] : [] });
+      }
+    }
+    return [...items.values()];
+  }
+
+  previewCleanup() {
+    dialog("metro-cleanup", { items: this.cleanupCandidates(shared("projects.tree") ?? []) });
   }
 
   // metro-actions.json: { "<folder, ~ for home>": [{ name, run: [argv] } | { name, agent: "claude", task }] }.
@@ -636,6 +661,10 @@ export default class Overview extends View {
               .role("button").accessibility_label("Add project").tooltip("Add project…")
               .on_click((_e, cx) => cx.spawn(async () => this.addProject()))
               .child(svg("mods/metro-chrome/icons/plus.svg").size(14)))
+            .when(this.cleanupCandidates(tree).length > 0, (el) => el.child(h_flex().id("cleanup-open").h(26).px(10).gap(5).items_center().rounded(7)
+              .bg(merged() + "1f").text_color(merged()).text_size(12.5).hover((s) => s.bg(merged() + "33"))
+              .role("button").accessibility_label("Clean up merged worktrees").on_click(() => this.previewCleanup())
+              .child(svg("mods/metro-chrome/icons/git-merge.svg").size(14).flex_none()).child("Clean up merged worktrees")))
             // Edit arranges the cards and renames projects; Done or Esc ends it.
             .child(div().flex_1())
             .child(div().id("projects-edit").h(26).px(10).flex().items_center().rounded(7).text_size(12.5)
