@@ -373,6 +373,8 @@ export default class Tabs extends View {
     const isAgent = (p) => p.status != null || Boolean(p.program?.agent);
     const here = new Set(spaces().find(s => s.id === f?.space)?.tabs.map(c => c.id) ?? []);
     const moved = f?.pane && this.lastPane && f.pane !== this.lastPane ? ps.find(p => p.pane === f.pane) : null;
+    // Focus that moved because its pane closed (its space removed, say) wasn't moved by the person.
+    const chosen = moved && ps.some(p => p.pane === this.lastPane) ? moved : null;
     if (f?.pane) this.lastPane = f.pane;
     if (agentView()) {
       const plain = fresh.find(p => here.has(p.tab) && !isAgent(p)) ?? (moved && !isAgent(moved) ? moved : null);
@@ -382,7 +384,7 @@ export default class Tabs extends View {
       } else if (moved && f.agent !== moved.terminal) run("agent.focus", { terminal: moved.terminal });
     }
     // The pull requests view and the overview give way to the tabs as soon as a pane is focused or opened in this space.
-    if ((prsView() || overviewView()) && (moved || fresh.some(p => here.has(p.tab)))) showTabs();
+    if ((prsView() || overviewView()) && (chosen || fresh.some(p => here.has(p.tab)))) showTabs();
     const stop = (_e, cx) => cx.stop_propagation();
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
